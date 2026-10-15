@@ -1,0 +1,25 @@
+﻿Debug
+Release
+
+# Build artifacts
+*.elf
+*.uf2
+*.map
+*.o
+*.d
+build_make/tools/elf2uf2
+build_make/tools/elf2uf2.exe
+tools/elf2uf2/elf2uf2
+build_make/.build_profile
+
+# Local Wi-Fi credentials. Copy config/wifi_credentials.example.h to this
+# path and edit it; never commit the populated file.
+config/wifi_credentials.h
+config/network_config.h
+config/udp_test_config.h
+config/tcp_test_config.h
+config/mqtt_config.h
+
+# Python
+__pycache__/
+*.pyc

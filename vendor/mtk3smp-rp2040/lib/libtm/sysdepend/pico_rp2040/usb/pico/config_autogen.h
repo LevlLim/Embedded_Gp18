@@ -1,0 +1,20 @@
+/*
+ * Copyright (c) 2026 Muhamed Fauzi Bin Abbas
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef PICO_CONFIG_AUTOGEN_H
+#define PICO_CONFIG_AUTOGEN_H
+
+#define PICO_RP2040 1
+#define PICO_32BIT 1
+#define PICO_NO_FLASH 0
+#define PICO_ON_DEVICE 1
+#define PICO_BUILD 1
+#define PICO_COPY_TO_RAM 0
+#define PICO_USE_BLOCKED_RAM 0
+#define PICO_RP2040_USB_DEVICE_ENUMERATION_FIX 0
+#define PICO_RP2040_USB_DEVICE_UFRAME_FIX 0
+
+#endif

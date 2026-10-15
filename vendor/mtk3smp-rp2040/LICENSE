@@ -1,0 +1,34 @@
+This repository combines source under more than one licence, so there is no
+single licence text that covers all of it. The full texts are in LICENSES/,
+and the mapping from each part of the repository to its licence is in the
+"Licensing" section at the bottom of README.md.
+
+In summary:
+
+  kernel/, include/, lib/libtk/, lib/libtm/ (core), device/, config/
+      micro T-Kernel 3.0, and this port's SMP additions to it:
+      the per-core kernel state, global ready queue, recursive big kernel
+      lock, cross-core dispatch, and the RP2040 SMP backend.
+      Copyright (C) 2006-2023 by Ken Sakamura
+      Released by TRON Forum (http://www.tron.org)
+      T-License 2.2  ->  LICENSES/T-License-2.2_TEF000-219-200401.pdf
+
+  lib/libnet/lwip/, lib/libwifi/, lib/libtm/sysdepend/pico_rp2040/usb/,
+  app_program/
+      Integration code written for this port: the lwIP raw-API driver, the
+      CYW43439 polling service, the TinyUSB console glue, and the demo
+      application.  These are built against third-party libraries but are
+      not derived from them.
+      Copyright (c) 2026 Muhamed Fauzi Bin Abbas
+      Apache-2.0  ->  LICENSES/Apache-2.0.txt
+
+  lib/libwifi/sysdepend/pico_rp2040/cyw43_bus_pio_spi.pio.h
+  tools/elf2uf2/
+      Generated from, or copied from, Raspberry Pi Pico SDK sources.
+      Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
+      BSD-3-Clause  ->  LICENSES/BSD-3-Clause_Raspberry-Pi.txt
+
+Nothing here is relicensed. Upstream copyright headers are left intact in
+every file; where this summary and a file header disagree, the file header
+governs. See README.md for the note on files that still carry T-License 2.1
+headers, and for the build dependencies that are not redistributed here.
