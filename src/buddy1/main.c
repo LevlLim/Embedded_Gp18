@@ -12,6 +12,7 @@ static T_CYW43_UTK_STATUS radio_status_snapshot;
 #endif
 #if TM_WIFI_MQTT
 #include "mqtt_service.h"
+static buddy1_mqtt_diagnostics_t mqtt_diagnostics_snapshot;
 #endif
 
 #define BUDDY1_STATUS_PRIORITY 15
@@ -44,6 +45,13 @@ static void status_task(INT start_code, void *extra)
                   buddy1_mqtt_connected() ? "connected" : "waiting",
                   buddy1_start_sequence(),
                   buddy1_stop_latched());
+        buddy1_mqtt_get_diagnostics(&mqtt_diagnostics_snapshot);
+        tm_printf((UB *)"[aai18] mqtt gaps=%u attempts=%u fails=%u telemetry_err=%u heartbeat_err=%u\n",
+                  mqtt_diagnostics_snapshot.max_poll_gap_ms,
+                  mqtt_diagnostics_snapshot.connect_attempts,
+                  mqtt_diagnostics_snapshot.connection_failures,
+                  mqtt_diagnostics_snapshot.telemetry_publish_errors,
+                  mqtt_diagnostics_snapshot.heartbeat_publish_errors);
 #else
         tm_printf((UB *)"[aai18] project firmware ready; MQTT disabled\n");
 #endif

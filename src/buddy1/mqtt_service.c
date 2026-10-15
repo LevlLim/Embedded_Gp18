@@ -34,6 +34,12 @@ static uint32_t next_attempt_ms;
 static uint32_t last_telemetry_ms;
 static uint32_t last_heartbeat_ms;
 static uint32_t publish_sequence;
+static uint32_t last_poll_ms;
+static volatile uint32_t max_poll_gap_ms;
+static volatile uint32_t connect_attempts;
+static volatile uint32_t connection_failures;
+static volatile uint32_t telemetry_publish_errors;
+static volatile uint32_t heartbeat_publish_errors;
 static char command_buffer[BUDDY1_COMMAND_CAPACITY];
 static uint32_t expected_command_length;
 static uint32_t command_length;
@@ -91,6 +97,7 @@ static void on_connection(mqtt_client_t *mqtt, void *argument,
     connecting = 0;
     subscribed = 0;
     if (status != MQTT_CONNECT_ACCEPTED) {
+        connection_failures++;
         next_attempt_ms = sys_now() + BUDDY1_RETRY_PERIOD_MS;
         return;
     }
@@ -122,6 +129,8 @@ static void publish_telemetry(uint32_t now_ms)
     if (mqtt_publish(client, AAI18_TOPIC_TELEMETRY, json, (u16_t)length,
                      0U, 0U, NULL, NULL) == ERR_OK) {
         publish_sequence++;
+    } else {
+        telemetry_publish_errors++;
     }
 }
 
@@ -133,8 +142,10 @@ static void publish_heartbeat(uint32_t now_ms)
     last_heartbeat_ms = now_ms;
     length = buddy1_format_u32(payload, sizeof(payload), now_ms);
     if (length != 0U) {
-        (void)mqtt_publish(client, AAI18_TOPIC_HEARTBEAT, payload,
-                           (u16_t)length, 0U, 0U, NULL, NULL);
+        if (mqtt_publish(client, AAI18_TOPIC_HEARTBEAT, payload,
+                         (u16_t)length, 0U, 0U, NULL, NULL) != ERR_OK) {
+            heartbeat_publish_errors++;
+        }
     }
 }
 
@@ -142,6 +153,15 @@ void buddy1_mqtt_poll(int network_ready, uint32_t now_ms)
 {
     ip_addr_t broker;
     err_t result;
+    uint32_t poll_gap_ms;
+
+    if (last_poll_ms != 0U) {
+        poll_gap_ms = now_ms - last_poll_ms;
+        if (poll_gap_ms > max_poll_gap_ms) {
+            max_poll_gap_ms = poll_gap_ms;
+        }
+    }
+    last_poll_ms = now_ms;
 
     if (!network_ready) {
         if (client != NULL) {
@@ -179,7 +199,9 @@ void buddy1_mqtt_poll(int network_ready, uint32_t now_ms)
         result = mqtt_client_connect(client, &broker,
                                      AAI18_MQTT_BROKER_PORT,
                                      on_connection, NULL, &connection_info);
+        connect_attempts++;
         if (result != ERR_OK) {
+            connection_failures++;
             return;
         }
         connecting = 1;
@@ -202,4 +224,16 @@ void buddy1_mqtt_poll(int network_ready, uint32_t now_ms)
 int buddy1_mqtt_connected(void)
 {
     return subscribed;
+}
+
+void buddy1_mqtt_get_diagnostics(buddy1_mqtt_diagnostics_t *diagnostics)
+{
+    if (diagnostics == NULL) {
+        return;
+    }
+    diagnostics->max_poll_gap_ms = max_poll_gap_ms;
+    diagnostics->connect_attempts = connect_attempts;
+    diagnostics->connection_failures = connection_failures;
+    diagnostics->telemetry_publish_errors = telemetry_publish_errors;
+    diagnostics->heartbeat_publish_errors = heartbeat_publish_errors;
 }

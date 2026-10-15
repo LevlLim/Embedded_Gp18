@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$ListenIp,
-    [string]$MosquittoExe = ''
+    [string]$MosquittoExe = '',
+    [switch]$VerboseBroker
 )
 
 $ErrorActionPreference = 'Stop'
@@ -39,7 +40,11 @@ $config = "listener 1883 $($address.ToString())`nallow_anonymous true`npersisten
 Write-Host 'Bench broker listening on' $address.ToString() 'port 1883.'
 Write-Host 'Keep this window open during the test. Press Ctrl+C to stop it.'
 Write-Host 'Use only with the motor battery disconnected.'
-& $MosquittoExe -c $configPath -v
+$brokerArguments = @('-c', $configPath)
+if ($VerboseBroker) {
+    $brokerArguments += '-v'
+}
+& $MosquittoExe @brokerArguments
 if ($LASTEXITCODE -ne 0) {
     throw "Mosquitto stopped with code $LASTEXITCODE. Check the port and Windows Firewall."
 }

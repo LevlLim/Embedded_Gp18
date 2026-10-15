@@ -69,7 +69,8 @@
 #endif
 
 #if TM_WIFI_MQTT
-#define MQTT_OUTPUT_RINGBUF_SIZE        512
+/* Hold several seconds of 5 Hz telemetry while Wi-Fi retransmits. */
+#define MQTT_OUTPUT_RINGBUF_SIZE        4096
 #endif
 
 #define LWIP_STATS                      0

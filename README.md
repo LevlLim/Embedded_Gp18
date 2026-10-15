@@ -142,7 +142,9 @@ If scripts are blocked, run
 instead.
 
 Leave that window open. It starts a temporary anonymous listener bound to
-that IPv4 address. Windows Firewall may ask for permission for Mosquitto to
+that IPv4 address. Add `-VerboseBroker` only when detailed connection logs
+are needed; leaving it off keeps high-rate telemetry from flooding the console.
+Windows Firewall may ask for permission for Mosquitto to
 accept local-network connections. If port 1883 is already in use by a
 Mosquitto service, stop that service before starting the bench listener.
 Because this listener accepts commands from any device on the LAN, use it
@@ -167,7 +169,10 @@ Send exact uppercase commands:
 ```
 
 The USB console shows `start_seq` increasing for START and `remote_stop=1`
-for STOP. No motor moves in this firmware. Disconnect and reconnect Wi-Fi
+for STOP. The `mqtt gaps` line reports the largest gap between radio-owner
+polls and counts failed connection and publish attempts. These counters help
+separate firmware scheduling stalls from Wi-Fi or broker backpressure.
+No motor moves in this firmware. Disconnect and reconnect Wi-Fi
 and time how long telemetry takes to return. The 10-second goal remains
 unverified until that physical test succeeds.
 
