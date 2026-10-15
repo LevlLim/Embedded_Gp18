@@ -69,7 +69,10 @@
 #endif
 
 #if TM_WIFI_MQTT
-/* Hold several seconds of 5 Hz telemetry while Wi-Fi retransmits. */
+/* lwIP's default permits only four unacknowledged publishes. At 5 Hz, a
+ * brief Wi-Fi delay can exhaust those slots even while the byte queue has
+ * space. Size both limits for several seconds of telemetry. */
+#define MQTT_REQ_MAX_IN_FLIGHT          32
 #define MQTT_OUTPUT_RINGBUF_SIZE        4096
 #endif
 
