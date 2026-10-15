@@ -1,6 +1,8 @@
 param(
     [Parameter(Mandatory = $true)]
-    [string]$BrokerIp
+    [string]$BrokerIp,
+    [ValidateSet('WPA2', 'WPA3', 'Mixed')]
+    [string]$WifiAuth = 'WPA2'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -47,6 +49,12 @@ $wifi = $wifi.Replace('"replace-with-ssid"',
                       (ConvertTo-CStringLiteral $ssid))
 $wifi = $wifi.Replace('"replace-with-password"',
                       (ConvertTo-CStringLiteral $password))
+switch ($WifiAuth) {
+    'WPA3' { $authMacro = 'CYW43_AUTH_WPA3_SAE_AES_PSK' }
+    'Mixed' { $authMacro = 'CYW43_AUTH_WPA3_WPA2_AES_PSK' }
+    default { $authMacro = 'CYW43_AUTH_WPA2_AES_PSK' }
+}
+$wifi = $wifi.Replace('CYW43_AUTH_WPA2_AES_PSK', $authMacro)
 $mqtt = $mqttExample.Replace('AAI18_MQTT_CONFIG_SET 0',
                              'AAI18_MQTT_CONFIG_SET 1')
 $mqtt = $mqtt.Replace('"192.168.1.100"',

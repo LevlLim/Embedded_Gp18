@@ -66,6 +66,11 @@ and is never printed in the terminal:
 .\scripts\configure-local.ps1 -BrokerIp 192.168.1.100
 ```
 
+The script uses WPA2 by default. Add `-WifiAuth WPA3` if the selected 2.4 GHz
+network is shown as WPA3-Personal in Windows, or `-WifiAuth Mixed` for a
+WPA2/WPA3 mixed network. Use the exact SSID: it is the network name, not a
+username, and its capitalisation matters.
+
 If PowerShell reports that running scripts is disabled, use this command for
 this one run. It does not change the machine's execution policy:
 
