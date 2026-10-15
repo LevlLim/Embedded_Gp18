@@ -29,6 +29,15 @@ static void status_task(INT start_code, void *extra)
                   radio_status_snapshot.scan_complete,
                   radio_status_snapshot.link_up,
                   radio_status_snapshot.dhcp_complete);
+#if TM_WIFI_MQTT
+        tm_printf((UB *)"[aai18] join started=%u done=%u request=%d result=%d link_status=%d networks=%u\n",
+                  radio_status_snapshot.join_started,
+                  radio_status_snapshot.join_complete,
+                  radio_status_snapshot.join_request_result,
+                  radio_status_snapshot.join_result,
+                  radio_status_snapshot.link_status,
+                  radio_status_snapshot.scan_count);
+#endif
 #endif
 #if TM_WIFI_MQTT
         tm_printf((UB *)"[aai18] MQTT=%s start_seq=%u remote_stop=%d\n",
