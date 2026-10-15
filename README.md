@@ -66,6 +66,13 @@ and is never printed in the terminal:
 .\scripts\configure-local.ps1 -BrokerIp 192.168.1.100
 ```
 
+If PowerShell reports that running scripts is disabled, use this command for
+this one run. It does not change the machine's execution policy:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\configure-local.ps1 -BrokerIp 192.168.1.100
+```
+
 Alternatively, copy the examples and edit the **copies** by hand:
 
 ```powershell
@@ -115,6 +122,10 @@ address from `ipconfig`:
 ```powershell
 .\scripts\run-broker.ps1 -ListenIp 192.168.1.100
 ```
+
+If scripts are blocked, run
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-broker.ps1 -ListenIp 192.168.1.100`
+instead.
 
 Leave that window open. It starts a temporary anonymous listener bound to
 that IPv4 address. Windows Firewall may ask for permission for Mosquitto to
