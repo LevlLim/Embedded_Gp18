@@ -110,6 +110,15 @@ the code links, not that physical Wi-Fi, MQTT, or timing goals are met.
    Send the COM port number or a screenshot of Device Manager and terminal
    output so we can diagnose it.
 
+For the MQTT build, the USB status line also shows Wi-Fi join results. A
+`link_status=-2` result means no matching Wi-Fi name was found: check the
+exact spelling and capitalisation of the SSID, and make sure its 2.4 GHz
+radio or phone hotspot is on and nearby. `link_status=-3` means Wi-Fi
+authentication failed; re-enter the password locally. The Pico W only uses
+2.4 GHz Wi-Fi. The computer running the MQTT broker must be reachable from
+the Pico's network; connecting the computer to another network can change
+its broker IP address.
+
 ### MQTT test after the Wi-Fi scan works
 
 Install the official [Mosquitto Windows broker](https://mosquitto.org/download/)
