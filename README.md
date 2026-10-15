@@ -173,8 +173,8 @@ for STOP. The `mqtt gaps` line reports the largest gap between radio-owner
 polls and counts failed connection and publish attempts. These counters help
 separate firmware scheduling stalls from Wi-Fi or broker backpressure.
 No motor moves in this firmware. Disconnect and reconnect Wi-Fi
-and time how long telemetry takes to return. The 10-second goal remains
-unverified until that physical test succeeds.
+and time how long telemetry takes to return. The broker-restart recovery test
+below does not cover a full router or Wi-Fi outage.
 
 ## Interfaces for the other buddies
 
@@ -210,6 +210,16 @@ safe and it is deliberately rearming.
 - Group 18 base, Wi-Fi scan, and MQTT builds: linked to UF2 files.
 - Host checks cover exact command parsing, malformed commands, signed
   integer limits, and output-buffer bounds.
-- The software has not yet been flashed or observed on this Pico W; it was
-  not connected during the builds. Network timing, recovery, and physical
-  emergency-stop latency require the Pico and later motor integration.
+- Bench test on 15 October 2026: the Pico W on a Maker Pi Pico carrier joined
+  a 2.4 GHz WPA3 network, obtained DHCP, and connected to Mosquitto 2.1.2 on
+  the PC. The motor battery was disconnected.
+- The PC received 100 consecutive telemetry messages with Pico timestamps
+  spaced 200 ms apart, and 20 heartbeats spaced 1000 ms apart. The Pico
+  reported zero telemetry and heartbeat publish errors during this sample.
+- After stopping and restarting the broker, the PC received the first Pico
+  telemetry 2928 ms after broker startup. This meets the 10-second broker
+  recovery goal in this bench setup; a router/Wi-Fi outage remains untested.
+- MQTT START incremented `start_seq` to 1 and STOP latched `remote_stop=1`
+  on the current firmware. No motor control is attached yet, so physical
+  emergency-stop latency and sensor-filled telemetry remain to be tested
+  after the other buddies integrate their tasks and hardware.
