@@ -56,7 +56,17 @@ tasks. The small console status task is priority 15.
 
 ### Enable MQTT
 
-Copy the examples and edit the **copies**:
+Once the Wi-Fi scan test succeeds, configure the network on your own PC.
+Find the broker PC's Wi-Fi IPv4 address using `ipconfig`; replace the example
+address below with that address. The script prompts for your 2.4 GHz Wi-Fi
+network name and password. The password stays in a local, Git-ignored header
+and is never printed in the terminal:
+
+```powershell
+.\scripts\configure-local.ps1 -BrokerIp 192.168.1.100
+```
+
+Alternatively, copy the examples and edit the **copies** by hand:
 
 ```powershell
 Copy-Item vendor\mtk3smp-rp2040\config\wifi_credentials.example.h vendor\mtk3smp-rp2040\config\wifi_credentials.h
@@ -95,17 +105,30 @@ the code links, not that physical Wi-Fi, MQTT, or timing goals are met.
 
 ### MQTT test after the Wi-Fi scan works
 
-Use a broker reachable from the Pico's LAN. Mosquitto provides Windows
-`mosquitto_sub` and `mosquitto_pub` tools. Its default local-only listener
-cannot accept a Pico on the LAN; configure an appropriate LAN listener and
-authentication for your trusted test network. See the
+Install the official [Mosquitto Windows broker](https://mosquitto.org/download/)
+on the computer connected to the same Wi-Fi LAN as the Pico. Its default
+local-only listener cannot accept the Pico. For an initial **bench test with
+the motor battery disconnected**, open another PowerShell window and run the
+following command, replacing the IP address with that computer's Wi-Fi IPv4
+address from `ipconfig`:
+
+```powershell
+.\scripts\run-broker.ps1 -ListenIp 192.168.1.100
+```
+
+Leave that window open. It starts a temporary anonymous listener bound to
+that IPv4 address. Windows Firewall may ask for permission for Mosquitto to
+accept local-network connections. If port 1883 is already in use by a
+Mosquitto service, stop that service before starting the bench listener.
+Because this listener accepts commands from any device on the LAN, use it
+only for this no-motor test. Set up broker authentication before a robot with
+motors uses remote commands. See the
 [Mosquitto configuration guide](https://mosquitto.org/man/mosquitto-conf-5.html).
-Windows Firewall may need to allow that listener.
 
 On the broker PC, subscribe to both outputs:
 
 ```powershell
-mosquitto_sub -h <broker-ip> -t "aai18/robot/#" -v
+& 'C:\Program Files\mosquitto\mosquitto_sub.exe' -h 192.168.1.100 -t "aai18/robot/#" -v
 ```
 
 Flash the MQTT UF2 after setting your Wi-Fi and broker details. Telemetry
@@ -114,8 +137,8 @@ has `valid:0`, meaning the other buddies have not supplied sensor values yet.
 Send exact uppercase commands:
 
 ```powershell
-mosquitto_pub -h <broker-ip> -t "aai18/robot/command" -m START
-mosquitto_pub -h <broker-ip> -t "aai18/robot/command" -m STOP
+& 'C:\Program Files\mosquitto\mosquitto_pub.exe' -h 192.168.1.100 -t "aai18/robot/command" -m START
+& 'C:\Program Files\mosquitto\mosquitto_pub.exe' -h 192.168.1.100 -t "aai18/robot/command" -m STOP
 ```
 
 The USB console shows `start_seq` increasing for START and `remote_stop=1`
