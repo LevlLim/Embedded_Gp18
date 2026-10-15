@@ -5,6 +5,10 @@
 
 #if TM_WIFI_CYW43
 #include "cyw43_utk.h"
+
+/* The course radio status contains diagnostic packet rings and is larger
+ * than this task's stack. Keep its snapshot in static memory. */
+static T_CYW43_UTK_STATUS radio_status_snapshot;
 #endif
 #if TM_WIFI_MQTT
 #include "mqtt_service.h"
@@ -19,12 +23,12 @@ static void status_task(INT start_code, void *extra)
     (void)extra;
     for (;;) {
 #if TM_WIFI_CYW43
-        T_CYW43_UTK_STATUS radio;
-
-        cyw43_utk_get_status(&radio);
+        cyw43_utk_get_status(&radio_status_snapshot);
         tm_printf((UB *)"[aai18] radio ready=%u scan=%u link=%u dhcp=%u\n",
-                  radio.ready, radio.scan_complete, radio.link_up,
-                  radio.dhcp_complete);
+                  radio_status_snapshot.ready,
+                  radio_status_snapshot.scan_complete,
+                  radio_status_snapshot.link_up,
+                  radio_status_snapshot.dhcp_complete);
 #endif
 #if TM_WIFI_MQTT
         tm_printf((UB *)"[aai18] MQTT=%s start_seq=%u remote_stop=%d\n",
