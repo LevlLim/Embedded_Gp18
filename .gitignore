@@ -1,0 +1,9 @@
+build/
+build-host/
+.vscode/settings.json
+compile_commands.json
+*.uf2
+*.elf
+*.bin
+*.hex
+*.map
