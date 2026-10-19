@@ -5,13 +5,14 @@
 #include "protocol.h"
 
 int32_t buddy1_state_init(void);
-void buddy1_set_mission(uint32_t state, uint32_t fault_flags);
-void buddy1_set_motion(int32_t left_mm_s, int32_t right_mm_s,
-                       int32_t left_count, int32_t right_count);
-void buddy1_set_line(int32_t line_error);
-void buddy1_set_barcode(int32_t decoded_code);
-void buddy1_set_hump(int32_t peak_mm);
-void buddy1_set_obstacle(int32_t distance_mm, int32_t width_mm);
+/* Return 1 if stored, 0 if outside the provisional range or unavailable. */
+int buddy1_set_mission(uint32_t state, uint32_t fault_flags);
+int buddy1_set_motion(int32_t left_mm_s, int32_t right_mm_s,
+                      int32_t left_count, int32_t right_count);
+int buddy1_set_line(int32_t line_error);
+int buddy1_set_barcode(int32_t decoded_code);
+int buddy1_set_hump(int32_t peak_mm);
+int buddy1_set_obstacle(int32_t distance_mm, int32_t width_mm);
 
 /* A missed mutex does not wait for a driving task; the caller can retry. */
 int buddy1_get_telemetry(buddy1_telemetry_t *sample);

@@ -24,8 +24,10 @@ Vehicle Controller through the interfaces below.
 
 The design review calls for telemetry at least 5 times per second, a 1-second
 heartbeat, remote START through the Vehicle Controller, remote STOP through
-`flg_estop`, and nonblocking reconnection. The firmware provides those paths;
-timing and recovery still need measurement on the real robot.
+`flg_estop`, and nonblocking reconnection. The new minimum-bit requirement
+changes all three MQTT payloads to compact binary. The old text START/STOP
+commands no longer work. See [Buddy 1 wire format and evidence](docs/buddy1-binary-protocol.md)
+and [professor feedback handoff](docs/professor-feedback-handoff.md).
 
 ## Build on Windows
 
@@ -99,6 +101,16 @@ messages.
 This creates `mtk3pico_smp0_usb_cdc_wifi_mqtt.uf2`. Compilation proves that
 the code links, not that physical Wi-Fi, MQTT, or timing goals are met.
 
+Host checks for the binary protocol and packed shared snapshot:
+
+```powershell
+& 'C:\mingw64\bin\gcc.exe' -std=c11 -Wall -Wextra -Werror -I src/buddy1 tests/protocol_test.c src/buddy1/protocol.c -o .tools/protocol_test.exe
+& .\.tools\protocol_test.exe
+& 'C:\mingw64\bin\gcc.exe' -std=c11 -Wall -Wextra -Werror -I tests/stubs -I src/buddy1 tests/state_test.c src/buddy1/state.c -o .tools/state_test.exe
+& .\.tools\state_test.exe
+python -B tests/mqtt_tool_test.py
+```
+
 ## First hardware test (no motor battery)
 
 1. Leave the Pico W on the Maker Pi Pico carrier. Disconnect any motor
@@ -152,20 +164,22 @@ only for this no-motor test. Set up broker authentication before a robot with
 motors uses remote commands. See the
 [Mosquitto configuration guide](https://mosquitto.org/man/mosquitto-conf-5.html).
 
-On the broker PC, subscribe to both outputs:
+On the broker PC, use the supplied decoder in another PowerShell window
+(Python 3 and Mosquitto command-line tools are needed):
 
 ```powershell
-& 'C:\Program Files\mosquitto\mosquitto_sub.exe' -h 192.168.1.100 -t "aai18/robot/#" -v
+python .\scripts\mqtt-tool.py watch --broker 192.168.1.100
 ```
 
 Flash the MQTT UF2 after setting your Wi-Fi and broker details. Telemetry
 should appear every 200 ms, with a heartbeat every 1000 ms. Initial telemetry
 has `valid:0`, meaning the other buddies have not supplied sensor values yet.
-Send exact uppercase commands:
+The tool reads the Pico's current boot session and sends a numbered binary
+command; a duplicate START or a command from an earlier boot is rejected:
 
 ```powershell
-& 'C:\Program Files\mosquitto\mosquitto_pub.exe' -h 192.168.1.100 -t "aai18/robot/command" -m START
-& 'C:\Program Files\mosquitto\mosquitto_pub.exe' -h 192.168.1.100 -t "aai18/robot/command" -m STOP
+python .\scripts\mqtt-tool.py start --broker 192.168.1.100
+python .\scripts\mqtt-tool.py stop --broker 192.168.1.100
 ```
 
 The USB console shows `start_seq` increasing for START and `remote_stop=1`
@@ -190,9 +204,12 @@ include path. Call these functions **from tasks, not ISRs**:
 | Obstacle Scan | `buddy1_set_obstacle(distance_mm, width_mm)` | Distance and profile width |
 | Vehicle Controller | `buddy1_set_mission(state, fault_flags)` | Mission state and faults |
 
-Each setter briefly holds a priority-inheritance mutex. The radio owner
-tries to copy the snapshot without waiting; if busy, it skips that one
+Each setter returns 1 when the value fits the provisional range and was
+stored, or 0 when it was rejected. Check the return value during integration.
+All setters briefly hold a priority-inheritance mutex. The radio owner
+tries to copy the packed snapshot without waiting; if busy, it skips that one
 publication. `valid_fields` identifies which subsystem has supplied data.
+See the range table in [Buddy 1 wire format and evidence](docs/buddy1-binary-protocol.md).
 
 After the Vehicle Controller creates `flg_events` and `flg_estop`, it calls
 `buddy1_attach_event_flags(events_id, start_bit, stop_bit, estop_id,
@@ -208,18 +225,19 @@ safe and it is deliberately rearming.
 
 - Unmodified course µT-Kernel single-core UART and Wi-Fi/USB builds: linked.
 - Group 18 base, Wi-Fi scan, and MQTT builds: linked to UF2 files.
-- Host checks cover exact command parsing, malformed commands, signed
-  integer limits, and output-buffer bounds.
+- Host checks cover binary commands, duplicate and stale sequence rejection,
+  signed range packing, and output-buffer bounds.
 - Bench test on 15 October 2026: the Pico W on a Maker Pi Pico carrier joined
   a 2.4 GHz WPA3 network, obtained DHCP, and connected to Mosquitto 2.1.2 on
   the PC. The motor battery was disconnected.
-- The PC received 100 consecutive telemetry messages with Pico timestamps
-  spaced 200 ms apart, and 20 heartbeats spaced 1000 ms apart. The Pico
-  reported zero telemetry and heartbeat publish errors during this sample.
+- With the *previous text-payload firmware*, the PC received 100 consecutive
+  telemetry messages with Pico timestamps spaced 200 ms apart, and 20
+  heartbeats spaced 1000 ms apart. The Pico reported zero publish errors.
 - After stopping and restarting the broker, the PC received the first Pico
   telemetry 2928 ms after broker startup. This meets the 10-second broker
   recovery goal in this bench setup; a router/Wi-Fi outage remains untested.
-- MQTT START incremented `start_seq` to 1 and STOP latched `remote_stop=1`
-  on the current firmware. No motor control is attached yet, so physical
-  emergency-stop latency and sensor-filled telemetry remain to be tested
-  after the other buddies integrate their tasks and hardware.
+- Text MQTT START incremented `start_seq` to 1 and STOP latched
+  `remote_stop=1` on the previous firmware. The new binary firmware builds
+  and passes host protocol tests, but must be flashed and measured on the
+  Pico W. No motor control is attached yet, so physical emergency-stop
+  latency and sensor-filled telemetry remain to be tested after integration.

@@ -11,11 +11,13 @@
 #include "protocol.h"
 #include "state.h"
 
+/* Provided by the course lwIP port; mixes the hardware timer into its PRNG. */
+extern uint32_t lwip_utk_rand(void);
+
 #define BUDDY1_TELEMETRY_PERIOD_MS 200U
 #define BUDDY1_HEARTBEAT_PERIOD_MS 1000U
 #define BUDDY1_RETRY_PERIOD_MS     1000U
-#define BUDDY1_COMMAND_CAPACITY    8U
-#define BUDDY1_JSON_CAPACITY     384U
+#define BUDDY1_COMMAND_CAPACITY BUDDY1_COMMAND_BYTES
 
 static mqtt_client_t *client;
 static struct mqtt_connect_client_info_t connection_info = {
@@ -24,7 +26,7 @@ static struct mqtt_connect_client_info_t connection_info = {
     .client_pass = AAI18_MQTT_PASSWORD,
     .keep_alive = 15U,
     .will_topic = AAI18_TOPIC_HEARTBEAT,
-    .will_msg = "offline",
+    .will_msg = "\x19",
     .will_qos = 0U,
     .will_retain = 0U
 };
@@ -33,14 +35,17 @@ static int connecting;
 static uint32_t next_attempt_ms;
 static uint32_t last_telemetry_ms;
 static uint32_t last_heartbeat_ms;
-static uint32_t publish_sequence;
+static uint16_t publish_sequence;
+static uint32_t session_id;
+static int session_initialized;
+static buddy1_command_tracker_t command_tracker;
 static uint32_t last_poll_ms;
 static volatile uint32_t max_poll_gap_ms;
 static volatile uint32_t connect_attempts;
 static volatile uint32_t connection_failures;
 static volatile uint32_t telemetry_publish_errors;
 static volatile uint32_t heartbeat_publish_errors;
-static char command_buffer[BUDDY1_COMMAND_CAPACITY];
+static uint8_t command_buffer[BUDDY1_COMMAND_CAPACITY];
 static uint32_t expected_command_length;
 static uint32_t command_length;
 static int command_topic;
@@ -51,7 +56,7 @@ static void on_incoming_topic(void *argument, const char *topic,
     (void)argument;
     command_topic = (topic != NULL) &&
                     (strcmp(topic, AAI18_TOPIC_COMMAND) == 0) &&
-                    (total_length <= BUDDY1_COMMAND_CAPACITY);
+                    (total_length == BUDDY1_COMMAND_CAPACITY);
     expected_command_length = total_length;
     command_length = 0U;
 }
@@ -69,8 +74,9 @@ static void on_incoming_data(void *argument, const u8_t *data,
     command_length += length;
     if ((flags & MQTT_DATA_FLAG_LAST) != 0U) {
         if (command_length == expected_command_length) {
-            buddy1_receive_command(buddy1_parse_command(
-                (const uint8_t *)command_buffer, command_length));
+            buddy1_receive_command(buddy1_accept_command(
+                &command_tracker, command_buffer, command_length,
+                session_id));
         }
         command_topic = 0;
     }
@@ -113,7 +119,7 @@ static void on_connection(mqtt_client_t *mqtt, void *argument,
 static void publish_telemetry(uint32_t now_ms)
 {
     buddy1_telemetry_t sample;
-    char json[BUDDY1_JSON_CAPACITY];
+    uint8_t payload[BUDDY1_TELEMETRY_MAX_BYTES];
     uint32_t length;
 
     last_telemetry_ms = now_ms;
@@ -121,12 +127,13 @@ static void publish_telemetry(uint32_t now_ms)
         return;
     }
     sample.uptime_ms = now_ms;
+    sample.session_id = session_id;
     sample.sequence = publish_sequence;
-    length = buddy1_format_telemetry(json, sizeof(json), &sample);
+    length = buddy1_pack_telemetry(payload, sizeof(payload), &sample);
     if (length == 0U) {
         return;
     }
-    if (mqtt_publish(client, AAI18_TOPIC_TELEMETRY, json, (u16_t)length,
+    if (mqtt_publish(client, AAI18_TOPIC_TELEMETRY, payload, (u16_t)length,
                      0U, 0U, NULL, NULL) == ERR_OK) {
         publish_sequence++;
     } else {
@@ -136,11 +143,12 @@ static void publish_telemetry(uint32_t now_ms)
 
 static void publish_heartbeat(uint32_t now_ms)
 {
-    char payload[24];
+    uint8_t payload[BUDDY1_HEARTBEAT_BYTES];
     uint32_t length;
 
     last_heartbeat_ms = now_ms;
-    length = buddy1_format_u32(payload, sizeof(payload), now_ms);
+    length = buddy1_pack_heartbeat(payload, sizeof(payload),
+                                   session_id, now_ms);
     if (length != 0U) {
         if (mqtt_publish(client, AAI18_TOPIC_HEARTBEAT, payload,
                          (u16_t)length, 0U, 0U, NULL, NULL) != ERR_OK) {
@@ -162,6 +170,13 @@ void buddy1_mqtt_poll(int network_ready, uint32_t now_ms)
         }
     }
     last_poll_ms = now_ms;
+
+    if (!session_initialized) {
+        /* The boot token rejects retained commands from an earlier boot.
+         * The course lwIP port mixes the current timer into this PRNG. */
+        session_id = lwip_utk_rand();
+        session_initialized = 1;
+    }
 
     if (!network_ready) {
         if (client != NULL) {

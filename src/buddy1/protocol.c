@@ -1,134 +1,168 @@
 #include "protocol.h"
 
 #include <stddef.h>
+#include <string.h>
+
+#define BUDDY1_WIRE_TELEMETRY  1U
+#define BUDDY1_WIRE_HEARTBEAT  2U
 
 typedef struct {
-    char *buffer;
-    uint32_t capacity;
-    uint32_t length;
+    uint8_t *buffer;
+    uint32_t capacity_bits;
+    uint32_t position;
     int valid;
-} text_writer_t;
+} bit_writer_t;
 
-static void append_character(text_writer_t *writer, char character)
+static void write_bits(bit_writer_t *writer, uint32_t value, uint32_t bits)
 {
-    if (!writer->valid || (writer->length + 1U >= writer->capacity)) {
+    uint32_t index;
+
+    if (!writer->valid || (bits > writer->capacity_bits - writer->position)) {
         writer->valid = 0;
         return;
     }
-    writer->buffer[writer->length] = character;
-    writer->length++;
-}
-
-static void append_text(text_writer_t *writer, const char *text)
-{
-    while (*text != '\0') {
-        append_character(writer, *text);
-        text++;
+    for (index = 0U; index < bits; index++) {
+        if ((value & (1U << index)) != 0U) {
+            writer->buffer[(writer->position + index) / 8U] |=
+                (uint8_t)(1U << ((writer->position + index) % 8U));
+        }
     }
+    writer->position += bits;
 }
 
-static void append_unsigned(text_writer_t *writer, uint32_t number)
+static uint32_t signed_bits(int32_t value, uint32_t bits)
 {
-    char digits[10];
-    uint32_t count = 0U;
-
-    do {
-        digits[count] = (char)('0' + (number % 10U));
-        number /= 10U;
-        count++;
-    } while ((number != 0U) && (count < sizeof(digits)));
-    while (count != 0U) {
-        count--;
-        append_character(writer, digits[count]);
-    }
+    return ((uint32_t)value) & ((1U << bits) - 1U);
 }
 
-static void append_signed(text_writer_t *writer, int32_t number)
+static int in_signed_range(int32_t value, int32_t limit)
 {
-    uint32_t magnitude;
-
-    if (number < 0) {
-        append_character(writer, '-');
-        magnitude = (uint32_t)(-(number + 1)) + 1U;
-    } else {
-        magnitude = (uint32_t)number;
-    }
-    append_unsigned(writer, magnitude);
+    return (value >= -limit) && (value <= limit);
 }
 
-static uint32_t finish_writer(text_writer_t *writer)
+static uint32_t read_u32_le(const uint8_t *input)
 {
-    if (!writer->valid) {
-        writer->buffer[0] = '\0';
+    return ((uint32_t)input[0]) | ((uint32_t)input[1] << 8) |
+           ((uint32_t)input[2] << 16) | ((uint32_t)input[3] << 24);
+}
+
+uint32_t buddy1_pack_telemetry(uint8_t *buffer, uint32_t capacity,
+                               const buddy1_telemetry_t *sample)
+{
+    bit_writer_t writer;
+
+    if ((buffer == NULL) || (sample == NULL) ||
+        (capacity == 0U) || (capacity > UINT32_MAX / 8U)) {
         return 0U;
     }
-    writer->buffer[writer->length] = '\0';
-    return writer->length;
+    if ((sample->mission_state > BUDDY1_MISSION_MAX) ||
+        ((sample->valid_fields & ~0x1fU) != 0U) ||
+        ((sample->fault_flags & ~BUDDY1_FAULT_MASK) != 0U)) {
+        return 0U;
+    }
+    if (((sample->valid_fields & BUDDY1_VALID_MOTION) != 0U) &&
+        (!in_signed_range(sample->speed_left_mm_s, BUDDY1_SPEED_LIMIT_MM_S) ||
+         !in_signed_range(sample->speed_right_mm_s, BUDDY1_SPEED_LIMIT_MM_S) ||
+         !in_signed_range(sample->encoder_left, BUDDY1_ENCODER_LIMIT) ||
+         !in_signed_range(sample->encoder_right, BUDDY1_ENCODER_LIMIT))) {
+        return 0U;
+    }
+    if (((sample->valid_fields & BUDDY1_VALID_LINE) != 0U) &&
+        !in_signed_range(sample->line_error, BUDDY1_LINE_LIMIT)) {
+        return 0U;
+    }
+    if (((sample->valid_fields & BUDDY1_VALID_BARCODE) != 0U) &&
+        (sample->barcode > BUDDY1_BARCODE_MAX)) {
+        return 0U;
+    }
+    if (((sample->valid_fields & BUDDY1_VALID_HUMP) != 0U) &&
+        (sample->hump_peak_mm > BUDDY1_HUMP_MAX_MM)) {
+        return 0U;
+    }
+    if (((sample->valid_fields & BUDDY1_VALID_OBSTACLE) != 0U) &&
+        ((sample->obstacle_distance_mm > BUDDY1_DISTANCE_MAX_MM) ||
+         (sample->obstacle_width_mm > BUDDY1_WIDTH_MAX_MM))) {
+        return 0U;
+    }
+
+    memset(buffer, 0, capacity);
+    writer = (bit_writer_t){buffer, capacity * 8U, 0U, 1};
+    write_bits(&writer, BUDDY1_WIRE_VERSION, 3U);
+    write_bits(&writer, BUDDY1_WIRE_TELEMETRY, 2U);
+    write_bits(&writer, 0U, 3U);
+    write_bits(&writer, sample->session_id, 32U);
+    write_bits(&writer, sample->uptime_ms, 32U);
+    write_bits(&writer, sample->sequence, 16U);
+    write_bits(&writer, sample->mission_state, 3U);
+    write_bits(&writer, sample->valid_fields, 5U);
+    write_bits(&writer, sample->fault_flags, 6U);
+    if ((sample->valid_fields & BUDDY1_VALID_MOTION) != 0U) {
+        write_bits(&writer, signed_bits(sample->speed_left_mm_s, 12U), 12U);
+        write_bits(&writer, signed_bits(sample->speed_right_mm_s, 12U), 12U);
+        write_bits(&writer, signed_bits(sample->encoder_left, 24U), 24U);
+        write_bits(&writer, signed_bits(sample->encoder_right, 24U), 24U);
+    }
+    if ((sample->valid_fields & BUDDY1_VALID_LINE) != 0U) {
+        write_bits(&writer, signed_bits(sample->line_error, 12U), 12U);
+    }
+    if ((sample->valid_fields & BUDDY1_VALID_BARCODE) != 0U) {
+        write_bits(&writer, sample->barcode, 4U);
+    }
+    if ((sample->valid_fields & BUDDY1_VALID_HUMP) != 0U) {
+        write_bits(&writer, sample->hump_peak_mm, 10U);
+    }
+    if ((sample->valid_fields & BUDDY1_VALID_OBSTACLE) != 0U) {
+        write_bits(&writer, sample->obstacle_distance_mm, 12U);
+        write_bits(&writer, sample->obstacle_width_mm, 12U);
+    }
+    return writer.valid ? ((writer.position + 7U) / 8U) : 0U;
 }
 
-enum buddy1_command buddy1_parse_command(const uint8_t *payload, uint32_t length)
+uint32_t buddy1_pack_heartbeat(uint8_t *buffer, uint32_t capacity,
+                               uint32_t session_id, uint32_t uptime_ms)
 {
-    if (payload == NULL) {
+    bit_writer_t writer;
+
+    if ((buffer == NULL) || (capacity < BUDDY1_HEARTBEAT_BYTES)) {
+        return 0U;
+    }
+    memset(buffer, 0, BUDDY1_HEARTBEAT_BYTES);
+    writer = (bit_writer_t){buffer, BUDDY1_HEARTBEAT_BYTES * 8U, 0U, 1};
+    write_bits(&writer, BUDDY1_WIRE_VERSION, 3U);
+    write_bits(&writer, BUDDY1_WIRE_HEARTBEAT, 2U);
+    write_bits(&writer, 0U, 3U);
+    write_bits(&writer, session_id, 32U);
+    write_bits(&writer, uptime_ms, 32U);
+    return BUDDY1_HEARTBEAT_BYTES;
+}
+
+enum buddy1_command buddy1_accept_command(buddy1_command_tracker_t *tracker,
+                                           const uint8_t *payload,
+                                           uint32_t length,
+                                           uint32_t session_id)
+{
+    uint16_t sequence;
+    uint16_t delta;
+    uint8_t action;
+
+    if ((tracker == NULL) || (payload == NULL) ||
+        (length != BUDDY1_COMMAND_BYTES) ||
+        ((payload[0] & 0x9fU) != 0x01U) ||
+        (read_u32_le(&payload[1]) != session_id)) {
         return BUDDY1_COMMAND_INVALID;
     }
-    if ((length == 5U) && (payload[0] == 'S') && (payload[1] == 'T') &&
-        (payload[2] == 'A') && (payload[3] == 'R') && (payload[4] == 'T')) {
-        return BUDDY1_COMMAND_START;
+    action = (payload[0] >> 5) & 0x03U;
+    if ((action != BUDDY1_COMMAND_START) &&
+        (action != BUDDY1_COMMAND_STOP)) {
+        return BUDDY1_COMMAND_INVALID;
     }
-    if ((length == 4U) && (payload[0] == 'S') && (payload[1] == 'T') &&
-        (payload[2] == 'O') && (payload[3] == 'P')) {
-        return BUDDY1_COMMAND_STOP;
+    sequence = (uint16_t)((uint16_t)payload[5] |
+                          ((uint16_t)payload[6] << 8));
+    delta = (uint16_t)(sequence - tracker->last_sequence);
+    if (tracker->has_sequence && ((delta == 0U) || (delta >= 0x8000U))) {
+        return BUDDY1_COMMAND_INVALID;
     }
-    return BUDDY1_COMMAND_INVALID;
-}
-
-uint32_t buddy1_format_u32(char *buffer, uint32_t capacity, uint32_t value)
-{
-    text_writer_t writer = {buffer, capacity, 0U, 1};
-
-    if ((buffer == NULL) || (capacity == 0U)) {
-        return 0U;
-    }
-    append_unsigned(&writer, value);
-    return finish_writer(&writer);
-}
-
-uint32_t buddy1_format_telemetry(char *buffer, uint32_t capacity,
-                                 const buddy1_telemetry_t *sample)
-{
-    text_writer_t writer = {buffer, capacity, 0U, 1};
-
-    if ((buffer == NULL) || (sample == NULL) || (capacity == 0U)) {
-        return 0U;
-    }
-    append_text(&writer, "{\"ms\":");
-    append_unsigned(&writer, sample->uptime_ms);
-    append_text(&writer, ",\"seq\":");
-    append_unsigned(&writer, sample->sequence);
-    append_text(&writer, ",\"state\":");
-    append_unsigned(&writer, sample->mission_state);
-    append_text(&writer, ",\"valid\":");
-    append_unsigned(&writer, sample->valid_fields);
-    append_text(&writer, ",\"fault\":");
-    append_unsigned(&writer, sample->fault_flags);
-    append_text(&writer, ",\"speed_l\":");
-    append_signed(&writer, sample->speed_left_mm_s);
-    append_text(&writer, ",\"speed_r\":");
-    append_signed(&writer, sample->speed_right_mm_s);
-    append_text(&writer, ",\"enc_l\":");
-    append_signed(&writer, sample->encoder_left);
-    append_text(&writer, ",\"enc_r\":");
-    append_signed(&writer, sample->encoder_right);
-    append_text(&writer, ",\"line\":");
-    append_signed(&writer, sample->line_error);
-    append_text(&writer, ",\"barcode\":");
-    append_signed(&writer, sample->barcode);
-    append_text(&writer, ",\"hump_mm\":");
-    append_signed(&writer, sample->hump_peak_mm);
-    append_text(&writer, ",\"distance_mm\":");
-    append_signed(&writer, sample->obstacle_distance_mm);
-    append_text(&writer, ",\"width_mm\":");
-    append_signed(&writer, sample->obstacle_width_mm);
-    append_character(&writer, '}');
-    return finish_writer(&writer);
+    tracker->last_sequence = sequence;
+    tracker->has_sequence = 1U;
+    return (enum buddy1_command)action;
 }
