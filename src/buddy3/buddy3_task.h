@@ -22,12 +22,17 @@ typedef struct
     uint32_t               missed_tick_count;
     uint32_t               adc_failure_count;
     uint32_t               queue_overflow_count;
+    uint32_t               packing_failure_count;
 } buddy3_task_diag_t;
 
 bool buddy3_task_init (buddy3_config_t const * const p_config);
 void buddy3_task_process_1ms (uint32_t timestamp_ms);
 bool buddy3_task_get_line (line_sensor_data_t * const p_data);
+bool buddy3_task_get_line_message (
+         line_sensor_message_t * const p_message);
 bool buddy3_task_get_barcode (barcode_decoder_event_t * const p_event);
+bool buddy3_task_get_barcode_message (
+         barcode_message_t * const p_message);
 bool buddy3_task_take_line_lost (void);
 bool buddy3_task_get_diagnostics (buddy3_task_diag_t * const p_diagnostics);
 

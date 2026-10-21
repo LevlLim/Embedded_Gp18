@@ -21,8 +21,9 @@
 static buddy3_config_t          g_config = { 0 };
 static line_sensor_t            g_line_sensor = { 0 };
 static barcode_decoder_t        g_barcode_decoder = { 0 };
-static line_sensor_data_t       g_line_snapshot = { 0 };
-static barcode_decoder_event_t  g_barcode_queue[BARCODE_QUEUE_CAPACITY] = { 0 };
+static line_sensor_message_t    g_line_snapshot = { { 0U } };
+static barcode_message_t        g_barcode_queue[BARCODE_QUEUE_CAPACITY] =
+                                    { { { 0U } } };
 static buddy3_task_diag_t       g_task_diagnostics = { 0 };
 static critical_section_t       g_shared_lock = { 0 };
 static line_sensor_state_t      g_previous_line_state = LINE_SENSOR_STATE_INVALID;
@@ -34,12 +35,15 @@ static uint8_t                  g_barcode_queue_count = 0U;
 static uint32_t                 g_missed_tick_count = 0U;
 static uint32_t                 g_adc_failure_count = 0U;
 static uint32_t                 g_queue_overflow_count = 0U;
+static uint32_t                 g_packing_failure_count = 0U;
 static bool                     g_b_line_available = false;
 static bool                     g_b_line_lost_pending = false;
 static bool                     g_b_task_initialized = false;
 
 static void buddy3_queue_barcode (
                 barcode_decoder_event_t const * const p_event);
+static bool buddy3_pop_barcode_message (
+                barcode_message_t * const p_message);
 static void buddy3_publish_diagnostics (void);
 
 bool buddy3_task_init (buddy3_config_t const * const p_config)
@@ -61,17 +65,20 @@ bool buddy3_task_init (buddy3_config_t const * const p_config)
         if (b_initialized)
         {
             g_config = *p_config;
-            g_line_snapshot.timestamp_ms    = 0U;
-            g_line_snapshot.left_raw        = 0U;
-            g_line_snapshot.center_raw      = 0U;
-            g_line_snapshot.left_darkness   = 0U;
-            g_line_snapshot.center_darkness = 0U;
-            g_line_snapshot.error           = 0;
-            g_line_snapshot.state           = LINE_SENSOR_STATE_INVALID;
-            g_line_snapshot.b_valid         = false;
+            {
+                uint8_t byte_index = 0U;
+
+                for (byte_index = 0U;
+                     byte_index < LINE_SENSOR_MESSAGE_SIZE_BYTES;
+                     byte_index++)
+                {
+                    g_line_snapshot.bytes[byte_index] = 0U;
+                }
+            }
             g_task_diagnostics.missed_tick_count = 0U;
             g_task_diagnostics.adc_failure_count = 0U;
             g_task_diagnostics.queue_overflow_count = 0U;
+            g_task_diagnostics.packing_failure_count = 0U;
             g_previous_line_state = LINE_SENSOR_STATE_INVALID;
             g_last_tick_ms = 0U;
             g_line_divider_count = 0U;
@@ -81,6 +88,7 @@ bool buddy3_task_init (buddy3_config_t const * const p_config)
             g_missed_tick_count = 0U;
             g_adc_failure_count = 0U;
             g_queue_overflow_count = 0U;
+            g_packing_failure_count = 0U;
             g_b_line_available = false;
             g_b_line_lost_pending = false;
             g_b_task_initialized = true;
@@ -152,19 +160,31 @@ void buddy3_task_process_1ms (uint32_t timestamp_ms)
 
                 if (b_line_processed)
                 {
-                    critical_section_enter_blocking(&g_shared_lock);
+                    line_sensor_message_t line_message = { { 0U } };
 
-                    g_line_snapshot = line_data;
-                    g_b_line_available = true;
-
-                    if ((LINE_SENSOR_STATE_LOST == line_data.state)
-                        && (LINE_SENSOR_STATE_LOST != g_previous_line_state))
+                    if (line_sensor_message_pack(
+                            &line_data,
+                            &line_message))
                     {
-                        g_b_line_lost_pending = true;
-                    }
+                        critical_section_enter_blocking(&g_shared_lock);
 
-                    g_previous_line_state = line_data.state;
-                    critical_section_exit(&g_shared_lock);
+                        g_line_snapshot = line_message;
+                        g_b_line_available = true;
+
+                        if ((LINE_SENSOR_STATE_LOST == line_data.state)
+                            && (LINE_SENSOR_STATE_LOST
+                                != g_previous_line_state))
+                        {
+                            g_b_line_lost_pending = true;
+                        }
+
+                        g_previous_line_state = line_data.state;
+                        critical_section_exit(&g_shared_lock);
+                    }
+                    else
+                    {
+                        g_packing_failure_count++;
+                    }
                 }
             }
             else
@@ -180,6 +200,7 @@ void buddy3_task_process_1ms (uint32_t timestamp_ms)
 bool buddy3_task_get_line (line_sensor_data_t * const p_data)
 {
     bool b_data_available = false;
+    line_sensor_message_t message = { { 0U } };
 
     if ((NULL != p_data) && g_b_task_initialized)
     {
@@ -187,7 +208,35 @@ bool buddy3_task_get_line (line_sensor_data_t * const p_data)
 
         if (g_b_line_available)
         {
-            *p_data = g_line_snapshot;
+            message = g_line_snapshot;
+            b_data_available = true;
+        }
+
+        critical_section_exit(&g_shared_lock);
+
+        if (b_data_available)
+        {
+            b_data_available = line_sensor_message_unpack(
+                                   &message,
+                                   p_data);
+        }
+    }
+
+    return (b_data_available);
+}
+
+bool buddy3_task_get_line_message (
+         line_sensor_message_t * const p_message)
+{
+    bool b_data_available = false;
+
+    if ((NULL != p_message) && g_b_task_initialized)
+    {
+        critical_section_enter_blocking(&g_shared_lock);
+
+        if (g_b_line_available)
+        {
+            *p_message = g_line_snapshot;
             b_data_available = true;
         }
 
@@ -199,26 +248,26 @@ bool buddy3_task_get_line (line_sensor_data_t * const p_data)
 
 bool buddy3_task_get_barcode (barcode_decoder_event_t * const p_event)
 {
+    barcode_message_t message = { { 0U } };
     bool b_event_available = false;
 
-    if ((NULL != p_event) && g_b_task_initialized)
+    if (NULL != p_event)
     {
-        critical_section_enter_blocking(&g_shared_lock);
+        b_event_available = buddy3_pop_barcode_message(&message);
 
-        if (0U < g_barcode_queue_count)
+        if (b_event_available)
         {
-            *p_event = g_barcode_queue[g_barcode_queue_tail];
-            g_barcode_queue_tail =
-                (uint8_t) ((g_barcode_queue_tail + 1U)
-                           % BARCODE_QUEUE_CAPACITY);
-            g_barcode_queue_count--;
-            b_event_available = true;
+            b_event_available = barcode_message_unpack(&message, p_event);
         }
-
-        critical_section_exit(&g_shared_lock);
     }
 
     return (b_event_available);
+}
+
+bool buddy3_task_get_barcode_message (
+         barcode_message_t * const p_message)
+{
+    return (buddy3_pop_barcode_message(p_message));
 }
 
 bool buddy3_task_take_line_lost (void)
@@ -260,23 +309,57 @@ static void buddy3_queue_barcode (
 {
     if (NULL != p_event)
     {
-        critical_section_enter_blocking(&g_shared_lock);
+        barcode_message_t message = { { 0U } };
 
-        if (BARCODE_QUEUE_CAPACITY <= g_barcode_queue_count)
+        if (barcode_message_pack(p_event, &message))
         {
-            g_queue_overflow_count++;
+            critical_section_enter_blocking(&g_shared_lock);
+
+            if (BARCODE_QUEUE_CAPACITY <= g_barcode_queue_count)
+            {
+                g_queue_overflow_count++;
+            }
+            else
+            {
+                g_barcode_queue[g_barcode_queue_head] = message;
+                g_barcode_queue_head =
+                    (uint8_t) ((g_barcode_queue_head + 1U)
+                               % BARCODE_QUEUE_CAPACITY);
+                g_barcode_queue_count++;
+            }
+
+            critical_section_exit(&g_shared_lock);
         }
         else
         {
-            g_barcode_queue[g_barcode_queue_head] = *p_event;
-            g_barcode_queue_head =
-                (uint8_t) ((g_barcode_queue_head + 1U)
+            g_packing_failure_count++;
+        }
+    }
+}
+
+static bool buddy3_pop_barcode_message (
+                barcode_message_t * const p_message)
+{
+    bool b_event_available = false;
+
+    if ((NULL != p_message) && g_b_task_initialized)
+    {
+        critical_section_enter_blocking(&g_shared_lock);
+
+        if (0U < g_barcode_queue_count)
+        {
+            *p_message = g_barcode_queue[g_barcode_queue_tail];
+            g_barcode_queue_tail =
+                (uint8_t) ((g_barcode_queue_tail + 1U)
                            % BARCODE_QUEUE_CAPACITY);
-            g_barcode_queue_count++;
+            g_barcode_queue_count--;
+            b_event_available = true;
         }
 
         critical_section_exit(&g_shared_lock);
     }
+
+    return (b_event_available);
 }
 
 static void buddy3_publish_diagnostics (void)
@@ -286,6 +369,7 @@ static void buddy3_publish_diagnostics (void)
     diagnostics.missed_tick_count = g_missed_tick_count;
     diagnostics.adc_failure_count = g_adc_failure_count;
     diagnostics.queue_overflow_count = g_queue_overflow_count;
+    diagnostics.packing_failure_count = g_packing_failure_count;
     (void) adc_sampler_get_snapshot(&diagnostics.adc_snapshot);
     (void) barcode_decoder_get_diagnostics(
                &g_barcode_decoder,

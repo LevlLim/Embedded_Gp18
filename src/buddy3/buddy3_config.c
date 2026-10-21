@@ -109,6 +109,8 @@ bool buddy3_config_is_valid (buddy3_config_t const * const p_config)
              && (0U < p_config->barcode_min_element_ms)
              && (p_config->barcode_min_element_ms
                  < p_config->barcode_max_element_ms)
+              && (p_config->barcode_max_element_ms
+                  <= BUDDY3_BARCODE_MAX_ELEMENT_MS)
              && (p_config->barcode_quiet_time_ms
                  <= p_config->barcode_max_element_ms)
              && (p_config->barcode_max_element_ms

@@ -105,9 +105,12 @@ int main (void)
             if (buddy3_task_get_line(&line_data))
             {
                 printf("IR L=%u C=%u B=%u, error=%d, state=%u, valid=%u\n",
-                       diagnostics.adc_snapshot.left_raw,
-                       diagnostics.adc_snapshot.center_raw,
-                       diagnostics.adc_snapshot.barcode_raw,
+                       adc_sampler_snapshot_get_left(
+                           &diagnostics.adc_snapshot),
+                       adc_sampler_snapshot_get_center(
+                           &diagnostics.adc_snapshot),
+                       adc_sampler_snapshot_get_barcode(
+                           &diagnostics.adc_snapshot),
                        line_data.error,
                        (unsigned int) line_data.state,
                        line_data.b_valid ? 1U : 0U);

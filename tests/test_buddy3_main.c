@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "adc_sampler.h"
 #include "barcode_decoder.h"
 #include "buddy3_config.h"
 #include "line_sensor.h"
@@ -27,7 +28,9 @@ static uint32_t g_failure_count = 0U;
 
 static void test_check (bool b_condition, char const * const p_message);
 static void test_line_sensor (void);
+static void test_line_message (void);
 static void test_barcode_symbol (uint8_t symbol, uint16_t pattern);
+static void test_barcode_message (void);
 static void test_feed_barcode (
                 barcode_decoder_t * const p_decoder,
                 buddy3_config_t const * const p_config,
@@ -50,8 +53,10 @@ static void test_feed_level (
 int main (void)
 {
     test_line_sensor();
+    test_line_message();
     test_barcode_symbol((uint8_t) 'A', TEST_CODE39_A_PATTERN);
     test_barcode_symbol((uint8_t) 'Z', TEST_CODE39_Z_PATTERN);
+    test_barcode_message();
 
     if (0U == g_failure_count)
     {
@@ -64,6 +69,64 @@ int main (void)
     }
 
     return ((int) g_failure_count);
+}
+
+static void test_line_message (void)
+{
+    line_sensor_data_t source =
+    {
+        UINT32_MAX,
+        BUDDY3_ADC_MAX_COUNT,
+        0U,
+        BUDDY3_DARKNESS_SCALE,
+        0U,
+        -((int16_t) BUDDY3_DARKNESS_SCALE),
+        LINE_SENSOR_STATE_LOST,
+        true
+    };
+    line_sensor_data_t recovered = { 0 };
+    line_sensor_message_t message = { { 0U } };
+
+    test_check(LINE_SENSOR_MESSAGE_SIZE_BYTES == sizeof(message),
+               "The packed line message should occupy 12 bytes.");
+    test_check(ADC_SAMPLER_SNAPSHOT_SIZE_BYTES
+               == sizeof(adc_sampler_snapshot_t),
+               "Three 12-bit ADC samples should occupy 5 bytes.");
+    test_check(line_sensor_message_pack(&source, &message),
+               "Boundary line data should pack successfully.");
+    test_check(line_sensor_message_unpack(&message, &recovered),
+               "A valid line message should unpack successfully.");
+    test_check((source.timestamp_ms == recovered.timestamp_ms)
+               && (source.left_raw == recovered.left_raw)
+               && (source.center_raw == recovered.center_raw)
+               && (source.left_darkness == recovered.left_darkness)
+               && (source.center_darkness == recovered.center_darkness)
+               && (source.error == recovered.error)
+               && (source.state == recovered.state)
+               && (source.b_valid == recovered.b_valid),
+               "Line data should survive a packed round trip.");
+
+    source.error = (int16_t) BUDDY3_DARKNESS_SCALE;
+    test_check(line_sensor_message_pack(&source, &message)
+               && line_sensor_message_unpack(&message, &recovered)
+               && (source.error == recovered.error),
+               "The positive line-error boundary should round trip.");
+
+    source.left_raw = BUDDY3_ADC_MAX_COUNT + 1U;
+    test_check(!line_sensor_message_pack(&source, &message),
+               "An out-of-range ADC value should be rejected.");
+
+    source.left_raw = BUDDY3_ADC_MAX_COUNT;
+    source.state = (line_sensor_state_t) -1;
+    test_check(!line_sensor_message_pack(&source, &message),
+               "An invalid line state should be rejected.");
+
+    source.state = LINE_SENSOR_STATE_LOST;
+    test_check(line_sensor_message_pack(&source, &message),
+               "Valid line data should repack after a rejected value.");
+    message.bytes[11U] |= 0x80U;
+    test_check(!line_sensor_message_unpack(&message, &recovered),
+               "A line message with reserved bits set should be rejected.");
 }
 
 static void test_check (bool b_condition, char const * const p_message)
@@ -183,6 +246,72 @@ static void test_barcode_symbol (uint8_t symbol, uint16_t pattern)
                "A reversed barcode should decode the expected symbol.");
     test_check(BARCODE_DECODER_DIRECTION_REVERSE == event.direction,
                "A reversed barcode should report reverse direction.");
+}
+
+static void test_barcode_message (void)
+{
+    uint8_t const payload[BUDDY3_BARCODE_MAX_PAYLOAD_LENGTH] =
+    {
+        (uint8_t) '0', (uint8_t) 'A', (uint8_t) 'Z', (uint8_t) '-',
+        (uint8_t) '$', (uint8_t) '/', (uint8_t) '+', (uint8_t) '%'
+    };
+    barcode_decoder_event_t source = { 0 };
+    barcode_decoder_event_t recovered = { 0 };
+    barcode_message_t message = { { 0U } };
+    uint8_t payload_index = 0U;
+
+    source.timestamp_ms = UINT32_MAX;
+    source.sequence_number = UINT32_MAX;
+    source.payload_length = BUDDY3_BARCODE_MAX_PAYLOAD_LENGTH;
+    source.direction = BARCODE_DECODER_DIRECTION_REVERSE;
+    source.b_valid = true;
+
+    for (payload_index = 0U;
+         payload_index < BUDDY3_BARCODE_MAX_PAYLOAD_LENGTH;
+         payload_index++)
+    {
+        source.payload[payload_index] = payload[payload_index];
+    }
+
+    test_check(BARCODE_MESSAGE_SIZE_BYTES == sizeof(message),
+               "The packed barcode message should occupy 15 bytes.");
+    test_check(BARCODE_DECODER_ELEMENT_BYTES == 112U,
+               "Ninety-nine 9-bit barcode widths should occupy 112 bytes.");
+    test_check(barcode_message_pack(&source, &message),
+               "A maximum-length Code 39 payload should pack.");
+    test_check(barcode_message_unpack(&message, &recovered),
+               "A valid barcode message should unpack.");
+    test_check((source.timestamp_ms == recovered.timestamp_ms)
+               && (source.sequence_number == recovered.sequence_number)
+               && (source.payload_length == recovered.payload_length)
+               && (source.direction == recovered.direction)
+               && (source.b_valid == recovered.b_valid),
+               "Barcode metadata should survive a packed round trip.");
+
+    for (payload_index = 0U;
+         payload_index < BUDDY3_BARCODE_MAX_PAYLOAD_LENGTH;
+         payload_index++)
+    {
+        test_check(source.payload[payload_index]
+                   == recovered.payload[payload_index],
+                   "Barcode payload symbols should survive packing.");
+    }
+
+    source.payload[0U] = (uint8_t) '*';
+    test_check(!barcode_message_pack(&source, &message),
+               "A non-payload Code 39 symbol should be rejected.");
+
+    source.payload[0U] = (uint8_t) '0';
+    source.direction = (barcode_decoder_direction_t) -1;
+    test_check(!barcode_message_pack(&source, &message),
+               "An invalid barcode direction should be rejected.");
+
+    source.direction = BARCODE_DECODER_DIRECTION_REVERSE;
+    test_check(barcode_message_pack(&source, &message),
+               "A valid barcode should repack after a rejected symbol.");
+    message.bytes[14U] |= 0x80U;
+    test_check(!barcode_message_unpack(&message, &recovered),
+               "A barcode message with reserved bits set should be rejected.");
 }
 
 static void test_feed_barcode (

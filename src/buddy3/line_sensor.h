@@ -12,6 +12,8 @@
 
 #include "buddy3_config.h"
 
+#define LINE_SENSOR_MESSAGE_SIZE_BYTES   (12U)
+
 typedef enum
 {
     LINE_SENSOR_STATE_INVALID = 0,
@@ -35,14 +37,16 @@ typedef struct
 
 typedef struct
 {
+    uint8_t bytes[LINE_SENSOR_MESSAGE_SIZE_BYTES];
+} line_sensor_message_t;
+
+typedef struct
+{
     buddy3_config_t config;
     uint32_t        missing_start_ms;
     int16_t         last_error;
     uint16_t        junction_sample_count;
-    bool            b_left_black;
-    bool            b_center_black;
-    bool            b_missing_active;
-    bool            b_initialized;
+    uint8_t         state_flags;
 } line_sensor_t;
 
 bool line_sensor_init (
@@ -53,6 +57,12 @@ bool line_sensor_process (
          uint16_t left_raw,
          uint16_t center_raw,
          uint32_t timestamp_ms,
+         line_sensor_data_t * const p_data);
+bool line_sensor_message_pack (
+         line_sensor_data_t const * const p_data,
+         line_sensor_message_t * const p_message);
+bool line_sensor_message_unpack (
+         line_sensor_message_t const * const p_message,
          line_sensor_data_t * const p_data);
 
 #endif /* LINE_SENSOR_H */

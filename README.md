@@ -44,11 +44,14 @@ counted in the diagnostics instead of being silently ignored.
 The consumer can use:
 
 - `buddy3_task_get_line()` for the latest timestamped line snapshot;
+- `buddy3_task_get_line_message()` for the 12-byte packed line message;
 - `buddy3_task_get_barcode()` to remove one decoded barcode event from the
   queue;
+- `buddy3_task_get_barcode_message()` to remove the equivalent 15-byte packed
+  barcode message without expanding it;
 - `buddy3_task_take_line_lost()` for a one-shot line-lost notification; and
 - `buddy3_task_get_diagnostics()` for missed ticks, ADC failures, decoder
-  failures, and queue overflows.
+  failures, queue overflows, and rejected packed values.
 
 `line_sensor_data_t.error` is normalized to the range -1000 to +1000. A
 negative value means the car should steer left; a positive value means it
@@ -93,6 +96,40 @@ modules unchanged and connect them as follows:
 
 The short critical sections copy complete structures, preventing consumers
 from seeing a mixture of old and new fields.
+
+## Minimum-bit data representation
+
+Buddy 3 keeps natural-width working values while calculating sensor results,
+then validates and packs the values at every shared-data boundary. Each packed
+object has one writer. Complete objects are copied inside the existing critical
+section, so no task performs an unprotected read-modify-write on a shared byte.
+
+| Data | Valid range | Bits | Packed representation |
+| --- | --- | ---: | --- |
+| ADC sample | 0 to 4095 | 12 | Three samples in 5 bytes |
+| Line darkness | 0 to 1000 | 10 each | Two fields in the line message |
+| Line error | -1000 to +1000 | 11 | Bias of +1000 |
+| Line state | 5 states | 3 | State field in the line message |
+| Line valid flag | false or true | 1 | Flag in the line message |
+| Code 39 payload symbol | 43 symbols | 6 each | Eight symbols in 6 bytes |
+| Barcode payload length | 0 to 8 | 4 | Length field in the barcode message |
+| Barcode direction | 2 directions | 1 | Direction flag |
+| Barcode valid flag | false or true | 1 | Valid flag |
+| Barcode element width | 0 to 511 ms | 9 each | 99 widths in 112 bytes |
+
+The line and barcode messages are 12 and 15 bytes respectively. On the RP2040
+ABI, their previous unpacked structures were 16 and 20 bytes. The packed
+barcode decoder state is 192 bytes instead of 280 bytes. Across the Buddy 3
+decoder, shared snapshots, four-entry barcode queue, diagnostics, and added
+packing counter, this saves approximately 104 bytes of static RAM.
+
+Packing rejects ADC, normalized line, line-error, state, payload-length, and
+Code 39 symbol values outside their declared ranges. Unpacking also rejects
+reserved bits or impossible encoded values. Host tests cover both signed
+boundaries, maximum ADC/darkness values, all eight payload positions, and
+malformed messages. A Pico W release build with warnings as errors confirms
+the packed code compiles for the target. Measure the 1 ms execution time on the
+car before treating the performance evidence as complete.
 
 ## Build and test
 

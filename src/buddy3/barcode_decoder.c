@@ -19,6 +19,26 @@
 #define CODE39_WIDE_ELEMENT_COUNT     (3U)
 #define CODE39_FIRST_WIDE_INDEX       (6U)
 #define PERCENT_SCALE                 (100U)
+#define BARCODE_STATE_COUNT_MASK      (0x007FU)
+#define BARCODE_STATE_COLOR_KNOWN     (0x0080U)
+#define BARCODE_STATE_IS_BLACK        (0x0100U)
+#define BARCODE_STATE_RECORDING       (0x0200U)
+#define BARCODE_STATE_INITIALIZED     (0x0400U)
+#define BARCODE_MESSAGE_TIMESTAMP     (0U)
+#define BARCODE_MESSAGE_SEQUENCE      (32U)
+#define BARCODE_MESSAGE_PAYLOAD       (64U)
+#define BARCODE_MESSAGE_LENGTH        (112U)
+#define BARCODE_MESSAGE_DIRECTION     (116U)
+#define BARCODE_MESSAGE_VALID         (117U)
+#define BARCODE_MESSAGE_SYMBOL_BITS   (6U)
+#define BARCODE_MESSAGE_RESERVED_MASK (0xC0U)
+
+_Static_assert(sizeof(barcode_message_t) == BARCODE_MESSAGE_SIZE_BYTES,
+               "Barcode message size changed");
+_Static_assert(BARCODE_DECODER_ELEMENT_BYTES
+               == (((BARCODE_DECODER_MAX_ELEMENTS
+                     * BARCODE_DECODER_ELEMENT_BITS) + 7U) / 8U),
+               "Barcode element storage size is inconsistent");
 
 static char const g_code39_symbols[CODE39_CHARACTER_COUNT + 1U] =
     "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-. $/+%";
@@ -75,6 +95,34 @@ static uint16_t barcode_get_width (
 static bool code39_pattern_to_symbol (
                 uint16_t pattern,
                 uint8_t * const p_symbol);
+static bool code39_symbol_to_code (
+                uint8_t symbol,
+                uint8_t * const p_code);
+static uint8_t barcode_get_element_count (
+                   barcode_decoder_t const * const p_decoder);
+static void barcode_set_element_count (
+                barcode_decoder_t * const p_decoder,
+                uint8_t element_count);
+static bool barcode_state_is_set (
+                barcode_decoder_t const * const p_decoder,
+                uint16_t mask);
+static void barcode_state_write (
+                barcode_decoder_t * const p_decoder,
+                uint16_t mask,
+                bool b_value);
+static void barcode_set_width (
+                barcode_decoder_t * const p_decoder,
+                uint8_t element_index,
+                uint16_t width_ms);
+static void barcode_message_write_bits (
+                barcode_message_t * const p_message,
+                uint16_t bit_offset,
+                uint8_t bit_count,
+                uint32_t value);
+static uint32_t barcode_message_read_bits (
+                    barcode_message_t const * const p_message,
+                    uint16_t bit_offset,
+                    uint8_t bit_count);
 
 bool barcode_decoder_init (
          barcode_decoder_t * const p_decoder,
@@ -91,20 +139,20 @@ bool barcode_decoder_init (
         p_decoder->diagnostics.invalid_count    = 0U;
         p_decoder->diagnostics.timeout_count    = 0U;
         p_decoder->diagnostics.overflow_count   = 0U;
-        p_decoder->element_count                = 0U;
         p_decoder->run_start_ms                 = 0U;
         p_decoder->recording_start_ms           = 0U;
         p_decoder->next_sequence_number         = 1U;
-        p_decoder->b_color_known                = false;
-        p_decoder->b_is_black                   = false;
-        p_decoder->b_recording                  = false;
-        p_decoder->b_initialized                = true;
+        p_decoder->state_bits                    = 0U;
+        barcode_state_write(
+            p_decoder,
+            BARCODE_STATE_INITIALIZED,
+            true);
 
         for (element_index = 0U;
-             element_index < BARCODE_DECODER_MAX_ELEMENTS;
+             element_index < BARCODE_DECODER_ELEMENT_BYTES;
              element_index++)
         {
-            p_decoder->element_width_ms[element_index] = 0U;
+            p_decoder->element_width_bits[element_index] = 0U;
         }
 
         b_initialized = true;
@@ -123,7 +171,9 @@ bool barcode_decoder_process_sample (
 
     if ((NULL != p_decoder)
         && (NULL != p_event)
-        && p_decoder->b_initialized)
+        && barcode_state_is_set(
+               p_decoder,
+               BARCODE_STATE_INITIALIZED))
     {
         uint16_t const darkness = buddy3_config_normalize_adc(
                                       raw_adc,
@@ -135,22 +185,34 @@ bool barcode_decoder_process_sample (
         p_event->direction       = BARCODE_DECODER_DIRECTION_FORWARD;
         p_event->b_valid         = false;
 
-        if (!p_decoder->b_color_known)
+        if (!barcode_state_is_set(
+                 p_decoder,
+                 BARCODE_STATE_COLOR_KNOWN))
         {
-            p_decoder->b_is_black =
-                (p_decoder->config.barcode_threshold <= darkness);
+            barcode_state_write(
+                p_decoder,
+                BARCODE_STATE_IS_BLACK,
+                (p_decoder->config.barcode_threshold <= darkness));
             p_decoder->run_start_ms  = timestamp_ms;
-            p_decoder->b_color_known = true;
+            barcode_state_write(
+                p_decoder,
+                BARCODE_STATE_COLOR_KNOWN,
+                true);
         }
         else
         {
             bool const b_new_is_black = barcode_update_black(
-                                            p_decoder->b_is_black,
+                                            barcode_state_is_set(
+                                                p_decoder,
+                                                BARCODE_STATE_IS_BLACK),
                                             darkness,
                                             p_decoder->config.barcode_threshold,
                                             p_decoder->config.barcode_hysteresis);
 
-            if (b_new_is_black != p_decoder->b_is_black)
+            if (b_new_is_black
+                != barcode_state_is_set(
+                       p_decoder,
+                       BARCODE_STATE_IS_BLACK))
             {
                 barcode_handle_transition(
                     p_decoder,
@@ -158,7 +220,9 @@ bool barcode_decoder_process_sample (
                     timestamp_ms);
             }
 
-            if (p_decoder->b_recording)
+            if (barcode_state_is_set(
+                    p_decoder,
+                    BARCODE_STATE_RECORDING))
             {
                 uint32_t const recording_time_ms =
                     timestamp_ms - p_decoder->recording_start_ms;
@@ -171,7 +235,9 @@ bool barcode_decoder_process_sample (
                     barcode_abort_capture(
                         p_decoder,
                         timestamp_ms,
-                        p_decoder->b_is_black);
+                        barcode_state_is_set(
+                            p_decoder,
+                            BARCODE_STATE_IS_BLACK));
                 }
                 else if (p_decoder->config.barcode_max_element_ms
                          < current_run_ms)
@@ -180,7 +246,9 @@ bool barcode_decoder_process_sample (
                     barcode_abort_capture(
                         p_decoder,
                         timestamp_ms,
-                        p_decoder->b_is_black);
+                        barcode_state_is_set(
+                            p_decoder,
+                            BARCODE_STATE_IS_BLACK));
                 }
                 else
                 {
@@ -204,13 +272,170 @@ bool barcode_decoder_get_diagnostics (
 
     if ((NULL != p_decoder)
         && (NULL != p_diagnostics)
-        && p_decoder->b_initialized)
+        && barcode_state_is_set(
+               p_decoder,
+               BARCODE_STATE_INITIALIZED))
     {
         *p_diagnostics = p_decoder->diagnostics;
         b_diagnostics_available = true;
     }
 
     return (b_diagnostics_available);
+}
+
+bool barcode_message_pack (
+         barcode_decoder_event_t const * const p_event,
+         barcode_message_t * const p_message)
+{
+    bool b_packed = false;
+
+    if ((NULL != p_event)
+        && (NULL != p_message)
+        && (p_event->payload_length <= BUDDY3_BARCODE_MAX_PAYLOAD_LENGTH)
+        && ((uint32_t) p_event->direction
+            <= (uint32_t) BARCODE_DECODER_DIRECTION_REVERSE))
+    {
+        uint8_t payload_index = 0U;
+        uint8_t byte_index = 0U;
+        bool b_symbols_valid = true;
+
+        for (byte_index = 0U;
+             byte_index < BARCODE_MESSAGE_SIZE_BYTES;
+             byte_index++)
+        {
+            p_message->bytes[byte_index] = 0U;
+        }
+
+        barcode_message_write_bits(
+            p_message,
+            BARCODE_MESSAGE_TIMESTAMP,
+            32U,
+            p_event->timestamp_ms);
+        barcode_message_write_bits(
+            p_message,
+            BARCODE_MESSAGE_SEQUENCE,
+            32U,
+            p_event->sequence_number);
+
+        for (payload_index = 0U;
+             b_symbols_valid && (payload_index < p_event->payload_length);
+             payload_index++)
+        {
+            uint8_t code = 0U;
+
+            b_symbols_valid = code39_symbol_to_code(
+                                  p_event->payload[payload_index],
+                                  &code);
+
+            if (b_symbols_valid)
+            {
+                barcode_message_write_bits(
+                    p_message,
+                    (uint16_t) (BARCODE_MESSAGE_PAYLOAD
+                                + (payload_index
+                                   * BARCODE_MESSAGE_SYMBOL_BITS)),
+                    BARCODE_MESSAGE_SYMBOL_BITS,
+                    code);
+            }
+        }
+
+        if (b_symbols_valid)
+        {
+            barcode_message_write_bits(
+                p_message,
+                BARCODE_MESSAGE_LENGTH,
+                4U,
+                p_event->payload_length);
+            barcode_message_write_bits(
+                p_message,
+                BARCODE_MESSAGE_DIRECTION,
+                1U,
+                (uint32_t) p_event->direction);
+            barcode_message_write_bits(
+                p_message,
+                BARCODE_MESSAGE_VALID,
+                1U,
+                p_event->b_valid ? 1U : 0U);
+            b_packed = true;
+        }
+    }
+
+    return (b_packed);
+}
+
+bool barcode_message_unpack (
+         barcode_message_t const * const p_message,
+         barcode_decoder_event_t * const p_event)
+{
+    bool b_unpacked = false;
+
+    if ((NULL != p_message) && (NULL != p_event))
+    {
+        uint8_t const payload_length = (uint8_t) barcode_message_read_bits(
+                                                    p_message,
+                                                    BARCODE_MESSAGE_LENGTH,
+                                                    4U);
+
+        if ((payload_length <= BUDDY3_BARCODE_MAX_PAYLOAD_LENGTH)
+            && (0U == (p_message->bytes[14U]
+                       & BARCODE_MESSAGE_RESERVED_MASK)))
+        {
+            uint8_t payload_index = 0U;
+            bool b_symbols_valid = true;
+
+            p_event->timestamp_ms = barcode_message_read_bits(
+                                        p_message,
+                                        BARCODE_MESSAGE_TIMESTAMP,
+                                        32U);
+            p_event->sequence_number = barcode_message_read_bits(
+                                           p_message,
+                                           BARCODE_MESSAGE_SEQUENCE,
+                                           32U);
+            p_event->payload_length = payload_length;
+            p_event->direction = (barcode_decoder_direction_t)
+                                 barcode_message_read_bits(
+                                     p_message,
+                                     BARCODE_MESSAGE_DIRECTION,
+                                     1U);
+            p_event->b_valid = (0U != barcode_message_read_bits(
+                                           p_message,
+                                           BARCODE_MESSAGE_VALID,
+                                           1U));
+
+            for (payload_index = 0U;
+                 payload_index < BUDDY3_BARCODE_MAX_PAYLOAD_LENGTH;
+                 payload_index++)
+            {
+                p_event->payload[payload_index] = 0U;
+            }
+
+            for (payload_index = 0U;
+                 b_symbols_valid && (payload_index < payload_length);
+                 payload_index++)
+            {
+                uint8_t const code = (uint8_t) barcode_message_read_bits(
+                    p_message,
+                    (uint16_t) (BARCODE_MESSAGE_PAYLOAD
+                                + (payload_index
+                                   * BARCODE_MESSAGE_SYMBOL_BITS)),
+                    BARCODE_MESSAGE_SYMBOL_BITS);
+
+                if (CODE39_CHARACTER_COUNT <= code)
+                {
+                    b_symbols_valid = false;
+                }
+                else
+                {
+                    p_event->payload[payload_index] =
+                        (uint8_t) g_code39_symbols[code];
+                }
+            }
+
+            b_unpacked = b_symbols_valid;
+        }
+    }
+
+    return (b_unpacked);
 }
 
 static bool barcode_update_black (
@@ -240,18 +465,25 @@ static void barcode_handle_transition (
 {
     uint32_t const run_duration_ms = timestamp_ms - p_decoder->run_start_ms;
 
-    if (!p_decoder->b_recording)
+    if (!barcode_state_is_set(
+             p_decoder,
+             BARCODE_STATE_RECORDING))
     {
         bool const b_start_detected =
-            ((!p_decoder->b_is_black)
+            ((!barcode_state_is_set(
+                  p_decoder,
+                  BARCODE_STATE_IS_BLACK))
              && b_new_is_black
              && (p_decoder->config.barcode_quiet_time_ms <= run_duration_ms));
 
         if (b_start_detected)
         {
-            p_decoder->element_count      = 0U;
+            barcode_set_element_count(p_decoder, 0U);
             p_decoder->recording_start_ms = timestamp_ms;
-            p_decoder->b_recording        = true;
+            barcode_state_write(
+                p_decoder,
+                BARCODE_STATE_RECORDING,
+                true);
         }
     }
     else if ((run_duration_ms < p_decoder->config.barcode_min_element_ms)
@@ -260,19 +492,29 @@ static void barcode_handle_transition (
         p_decoder->diagnostics.invalid_count++;
         barcode_abort_capture(p_decoder, timestamp_ms, b_new_is_black);
     }
-    else if (BARCODE_DECODER_MAX_ELEMENTS <= p_decoder->element_count)
+    else if (BARCODE_DECODER_MAX_ELEMENTS
+             <= barcode_get_element_count(p_decoder))
     {
         p_decoder->diagnostics.overflow_count++;
         barcode_abort_capture(p_decoder, timestamp_ms, b_new_is_black);
     }
     else
     {
-        p_decoder->element_width_ms[p_decoder->element_count] =
-            (uint16_t) run_duration_ms;
-        p_decoder->element_count++;
+        uint8_t const element_count = barcode_get_element_count(p_decoder);
+
+        barcode_set_width(
+            p_decoder,
+            element_count,
+            (uint16_t) run_duration_ms);
+        barcode_set_element_count(
+            p_decoder,
+            (uint8_t) (element_count + 1U));
     }
 
-    p_decoder->b_is_black  = b_new_is_black;
+    barcode_state_write(
+        p_decoder,
+        BARCODE_STATE_IS_BLACK,
+        b_new_is_black);
     p_decoder->run_start_ms = timestamp_ms;
 }
 
@@ -284,7 +526,9 @@ static bool barcode_try_finish (
     bool b_event_ready = false;
     uint32_t const current_run_ms = timestamp_ms - p_decoder->run_start_ms;
     bool const b_end_detected =
-        ((!p_decoder->b_is_black)
+        ((!barcode_state_is_set(
+              p_decoder,
+              BARCODE_STATE_IS_BLACK))
          && (p_decoder->config.barcode_quiet_time_ms <= current_run_ms));
 
     if (b_end_detected)
@@ -304,8 +548,11 @@ static bool barcode_try_finish (
             p_decoder->diagnostics.invalid_count++;
         }
 
-        p_decoder->element_count = 0U;
-        p_decoder->b_recording   = false;
+        barcode_set_element_count(p_decoder, 0U);
+        barcode_state_write(
+            p_decoder,
+            BARCODE_STATE_RECORDING,
+            false);
     }
 
     return (b_event_ready);
@@ -316,11 +563,17 @@ static void barcode_abort_capture (
                 uint32_t timestamp_ms,
                 bool b_current_is_black)
 {
-    p_decoder->element_count      = 0U;
+    barcode_set_element_count(p_decoder, 0U);
     p_decoder->recording_start_ms = 0U;
     p_decoder->run_start_ms       = timestamp_ms;
-    p_decoder->b_is_black         = b_current_is_black;
-    p_decoder->b_recording        = false;
+    barcode_state_write(
+        p_decoder,
+        BARCODE_STATE_IS_BLACK,
+        b_current_is_black);
+    barcode_state_write(
+        p_decoder,
+        BARCODE_STATE_RECORDING,
+        false);
 }
 
 static bool barcode_decode_capture (
@@ -342,7 +595,8 @@ static bool barcode_decode_orientation (
                 bool b_reverse,
                 barcode_decoder_event_t * const p_event)
 {
-    uint16_t const adjusted_count = p_decoder->element_count + 1U;
+    uint16_t const adjusted_count =
+        (uint16_t) barcode_get_element_count(p_decoder) + 1U;
     uint16_t const character_count = adjusted_count / CODE39_GROUP_SIZE;
     bool b_decoded =
         ((0U == (adjusted_count % CODE39_GROUP_SIZE))
@@ -540,10 +794,35 @@ static uint16_t barcode_get_width (
 
     if (b_reverse)
     {
-        physical_index = (p_decoder->element_count - 1U) - logical_index;
+        physical_index =
+            ((uint16_t) barcode_get_element_count(p_decoder) - 1U)
+            - logical_index;
     }
 
-    return (p_decoder->element_width_ms[physical_index]);
+    {
+        uint16_t value = 0U;
+        uint8_t bit_index = 0U;
+        uint16_t const bit_offset =
+            physical_index * BARCODE_DECODER_ELEMENT_BITS;
+
+        for (bit_index = 0U;
+             bit_index < BARCODE_DECODER_ELEMENT_BITS;
+             bit_index++)
+        {
+            uint16_t const element_bit = bit_offset + bit_index;
+            uint8_t const byte_index = (uint8_t) (element_bit / 8U);
+            uint8_t const bit_mask =
+                (uint8_t) (1U << (element_bit % 8U));
+
+            if (0U != (p_decoder->element_width_bits[byte_index]
+                       & bit_mask))
+            {
+                value |= (uint16_t) (1U << bit_index);
+            }
+        }
+
+        return (value);
+    }
 }
 
 static bool code39_pattern_to_symbol (
@@ -576,6 +855,142 @@ static bool code39_pattern_to_symbol (
     }
 
     return (b_symbol_found);
+}
+
+static bool code39_symbol_to_code (
+                uint8_t symbol,
+                uint8_t * const p_code)
+{
+    bool b_code_found = false;
+    uint8_t code = 0U;
+
+    if (NULL != p_code)
+    {
+        for (code = 0U;
+             (!b_code_found) && (code < CODE39_CHARACTER_COUNT);
+             code++)
+        {
+            if ((uint8_t) g_code39_symbols[code] == symbol)
+            {
+                *p_code = code;
+                b_code_found = true;
+            }
+        }
+    }
+
+    return (b_code_found);
+}
+
+static uint8_t barcode_get_element_count (
+                   barcode_decoder_t const * const p_decoder)
+{
+    return ((uint8_t) (p_decoder->state_bits
+                       & BARCODE_STATE_COUNT_MASK));
+}
+
+static void barcode_set_element_count (
+                barcode_decoder_t * const p_decoder,
+                uint8_t element_count)
+{
+    p_decoder->state_bits =
+        (uint16_t) ((p_decoder->state_bits
+                    & (uint16_t) (~BARCODE_STATE_COUNT_MASK))
+                   | ((uint16_t) element_count
+                      & BARCODE_STATE_COUNT_MASK));
+}
+
+static bool barcode_state_is_set (
+                barcode_decoder_t const * const p_decoder,
+                uint16_t mask)
+{
+    return (0U != (p_decoder->state_bits & mask));
+}
+
+static void barcode_state_write (
+                barcode_decoder_t * const p_decoder,
+                uint16_t mask,
+                bool b_value)
+{
+    if (b_value)
+    {
+        p_decoder->state_bits |= mask;
+    }
+    else
+    {
+        p_decoder->state_bits &= (uint16_t) (~mask);
+    }
+}
+
+static void barcode_set_width (
+                barcode_decoder_t * const p_decoder,
+                uint8_t element_index,
+                uint16_t width_ms)
+{
+    uint8_t bit_index = 0U;
+    uint16_t const bit_offset =
+        (uint16_t) element_index * BARCODE_DECODER_ELEMENT_BITS;
+
+    for (bit_index = 0U;
+         bit_index < BARCODE_DECODER_ELEMENT_BITS;
+         bit_index++)
+    {
+        uint16_t const element_bit = bit_offset + bit_index;
+        uint8_t const byte_index = (uint8_t) (element_bit / 8U);
+        uint8_t const bit_mask =
+            (uint8_t) (1U << (element_bit % 8U));
+
+        p_decoder->element_width_bits[byte_index] &=
+            (uint8_t) (~bit_mask);
+
+        if (0U != (width_ms & (uint16_t) (1U << bit_index)))
+        {
+            p_decoder->element_width_bits[byte_index] |= bit_mask;
+        }
+    }
+}
+
+static void barcode_message_write_bits (
+                barcode_message_t * const p_message,
+                uint16_t bit_offset,
+                uint8_t bit_count,
+                uint32_t value)
+{
+    uint8_t bit_index = 0U;
+
+    for (bit_index = 0U; bit_index < bit_count; bit_index++)
+    {
+        uint16_t const message_bit = bit_offset + bit_index;
+        uint8_t const byte_index = (uint8_t) (message_bit / 8U);
+        uint8_t const bit_mask = (uint8_t) (1U << (message_bit % 8U));
+
+        if (0U != (value & ((uint32_t) 1U << bit_index)))
+        {
+            p_message->bytes[byte_index] |= bit_mask;
+        }
+    }
+}
+
+static uint32_t barcode_message_read_bits (
+                    barcode_message_t const * const p_message,
+                    uint16_t bit_offset,
+                    uint8_t bit_count)
+{
+    uint32_t value = 0U;
+    uint8_t bit_index = 0U;
+
+    for (bit_index = 0U; bit_index < bit_count; bit_index++)
+    {
+        uint16_t const message_bit = bit_offset + bit_index;
+        uint8_t const byte_index = (uint8_t) (message_bit / 8U);
+        uint8_t const bit_mask = (uint8_t) (1U << (message_bit % 8U));
+
+        if (0U != (p_message->bytes[byte_index] & bit_mask))
+        {
+            value |= ((uint32_t) 1U << bit_index);
+        }
+    }
+
+    return (value);
 }
 
 /*** end of file ***/

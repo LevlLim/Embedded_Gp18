@@ -13,6 +13,7 @@
 #define BUDDY3_ADC_MAX_COUNT                 (4095U)
 #define BUDDY3_DARKNESS_SCALE               (1000U)
 #define BUDDY3_BARCODE_MAX_PAYLOAD_LENGTH   (8U)
+#define BUDDY3_BARCODE_MAX_ELEMENT_MS        (511U)
 
 typedef struct
 {
