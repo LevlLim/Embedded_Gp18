@@ -1,0 +1,116 @@
+{
+    "version": 3,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 21,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "base",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "toolchainFile": "${sourceDir}/cmake/arm-none-eabi.cmake",
+            "cacheVariables": {
+                "AAI18_PICO_SDK_PATH": "${sourceDir}/pico-sdk-min"
+            }
+        },
+        {
+            "name": "usb",
+            "displayName": "USB console + WiFi (needs pico-sdk 2.2.0)",
+            "inherits": "base"
+        },
+        {
+            "name": "usb-test",
+            "displayName": "USB console + WiFi, self-tests (car on blocks)",
+            "inherits": "base",
+            "cacheVariables": {
+                "AAI18_TEST": "ON"
+            }
+        },
+        {
+            "name": "mqtt",
+            "displayName": "USB console + WiFi + MQTT telemetry",
+            "inherits": "base",
+            "cacheVariables": {
+                "AAI18_NET": "lwip",
+                "AAI18_MQTT": "ON"
+            }
+        },
+        {
+            "name": "test-b1",
+            "displayName": "Self-test: Buddy 1 only (Telemetry / Comms)",
+            "inherits": "base",
+            "cacheVariables": {
+                "AAI18_TEST_BUDDY": "1"
+            }
+        },
+        {
+            "name": "test-b2",
+            "displayName": "Self-test: Buddy 2 only (Motion Control)",
+            "inherits": "base",
+            "cacheVariables": {
+                "AAI18_TEST_BUDDY": "2"
+            }
+        },
+        {
+            "name": "test-b3",
+            "displayName": "Self-test: Buddy 3 only (Line + Barcode)",
+            "inherits": "base",
+            "cacheVariables": {
+                "AAI18_TEST_BUDDY": "3"
+            }
+        },
+        {
+            "name": "test-b4",
+            "displayName": "Self-test: Buddy 4 only (IMU / Terrain)",
+            "inherits": "base",
+            "cacheVariables": {
+                "AAI18_TEST_BUDDY": "4"
+            }
+        },
+        {
+            "name": "test-b5",
+            "displayName": "Self-test: Buddy 5 only (Obstacle + Controller)",
+            "inherits": "base",
+            "cacheVariables": {
+                "AAI18_TEST_BUDDY": "5"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "usb",
+            "configurePreset": "usb"
+        },
+        {
+            "name": "usb-test",
+            "configurePreset": "usb-test"
+        },
+        {
+            "name": "mqtt",
+            "configurePreset": "mqtt"
+        },
+        {
+            "name": "test-b1",
+            "configurePreset": "test-b1"
+        },
+        {
+            "name": "test-b2",
+            "configurePreset": "test-b2"
+        },
+        {
+            "name": "test-b3",
+            "configurePreset": "test-b3"
+        },
+        {
+            "name": "test-b4",
+            "configurePreset": "test-b4"
+        },
+        {
+            "name": "test-b5",
+            "configurePreset": "test-b5"
+        }
+    ]
+}
