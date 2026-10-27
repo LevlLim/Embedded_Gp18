@@ -377,9 +377,31 @@ set_target_properties(${EXE_NAME} PROPERTIES
     LINK_DEPENDS ${T}/etc/linker/pico_rp2040/tkernel_map.ld)
 
 # .uf2 for drag-and-drop flashing, and the size report the makefile prints.
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
+# Python: on PATH, or the copy the Raspberry Pi Pico VS Code extension
+# downloads into ~/.pico-sdk/python (it does not put it on PATH).
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(NOT Python3_FOUND)
+    set(_aai18_home "$ENV{USERPROFILE}")
+    if(NOT _aai18_home)
+        set(_aai18_home "$ENV{HOME}")
+    endif()
+    file(TO_CMAKE_PATH "${_aai18_home}" _aai18_home)
+    file(GLOB _aai18_py LIST_DIRECTORIES true
+         "${_aai18_home}/.pico-sdk/python/*")
+    list(SORT _aai18_py ORDER DESCENDING)
+    foreach(_d ${_aai18_py})
+        if(NOT Python3_FOUND)
+            set(Python3_ROOT_DIR "${_d}")
+            find_package(Python3 QUIET COMPONENTS Interpreter)
+        endif()
+    endforeach()
+endif()
+if(NOT Python3_FOUND)
+    message(FATAL_ERROR "Python 3 not found: install it from python.org "
+                        "and tick \"Add python.exe to PATH\".")
+endif()
 add_custom_command(TARGET ${EXE_NAME} POST_BUILD
-    COMMAND arm-none-eabi-size ${EXE_NAME}.elf
+    COMMAND ${AAI18_ARM_SIZE} ${EXE_NAME}.elf
     COMMAND ${Python3_EXECUTABLE} ${T}/cmake/elf2uf2.py
             ${EXE_NAME}.elf ${EXE_NAME}.uf2
     COMMENT "Writing ${EXE_NAME}.uf2"
