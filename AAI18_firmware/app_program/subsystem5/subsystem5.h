@@ -100,7 +100,8 @@ typedef enum
    many readings in a row (x 60 ms), and anything under S5_MIN_VALID_CM is
    treated as no reading (the sensor's own blind zone). */
 #define S5_CONFIRM_PINGS        (2u)
-#define S5_MIN_VALID_CM         (3u)
+#define S5_START_GRACE_MS       (800u)  /* ignore the START-pressing hand */
+#define S5_MIN_VALID_CM         (5u)    /* 3 cm ghost echoes stopped the car */
 #define S5_DSTOP_ARC_DEG        (15)    /* D_stop only counts ahead      */
 #define S5_OBJECT_DEPTH_TOL_CM  (10u)   /* same object if within this    */
 #define S5_CLEAR_RANGE_CM       (50u)   /* free if nothing nearer        */
@@ -122,6 +123,10 @@ uint8_t s5_get_encoded_state(void);
 
 /* True while the mission is RUNNING. */
 bool s5_is_running(void);
+
+/* True once the boot self-test / calibration has finished (READY or
+   FAULT).  The TEST build waits on this before running the tests. */
+bool s5_is_initialised(void);
 
 /* Latest forward distance in cm (0 = nothing in range), for telemetry.
    One byte, written only by Obstacle Scan. */

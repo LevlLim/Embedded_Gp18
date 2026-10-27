@@ -648,6 +648,11 @@ EXPORT uint8_t s5_get_encoded_state(void)
     return (mission);
 }
 
+EXPORT bool s5_is_initialised(void)
+{
+    return (S5_PARENT_INIT != get_parent());
+}
+
 EXPORT bool s5_is_running(void)
 {
     return (S5_PARENT_RUNNING == get_parent());

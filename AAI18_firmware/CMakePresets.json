@@ -13,7 +13,8 @@
             "binaryDir": "${sourceDir}/build/${presetName}",
             "toolchainFile": "${sourceDir}/cmake/arm-none-eabi.cmake",
             "cacheVariables": {
-                "AAI18_PICO_SDK_PATH": "${sourceDir}/pico-sdk-min"
+                "AAI18_PICO_SDK_PATH": "${sourceDir}/pico-sdk-min",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
             }
         },
         {

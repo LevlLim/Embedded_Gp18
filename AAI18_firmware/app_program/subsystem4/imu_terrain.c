@@ -49,6 +49,13 @@ static uint32_t peak_mm        = 0u;
 
 static uint8_t  consecutive_fail = 0u;
 
+/* Calibration result.  Without offsets the tilt is wrong by however the
+   chip sits, so tilt / collision E-STOPs are only raised once calibrated
+   (bench log: an uncalibrated IMU raised TILT 37 deg on a flat floor). */
+static bool     b_calibrated  = false;
+static uint32_t cal_samples   = 0u;
+static int32_t  cal_spread_mg = 0;
+
 /* Impact debounce: samples in a row over the threshold, carried across
    batches, and the strongest one seen in the current run of them. */
 static uint8_t  impact_run    = 0u;
@@ -137,43 +144,79 @@ static INT read_fifo(uint8_t *p_buf, uint8_t max_samples)
 static bool calibrate(void)
 {
     uint8_t  buf[S4_BYTES_PER_SAMPLE];
-    int32_t  sum_x;
-    int32_t  sum_y;
-    int32_t  min_x;
-    int32_t  max_x;
+    int32_t  sum_x = 0;
+    int32_t  sum_y = 0;
+    int32_t  min_x = 32767;
+    int32_t  max_x = -32768;
     int32_t  axis_x;
     uint32_t count;
-    uint32_t attempt;
     bool     b_ok = false;
 
-    for (attempt = 0u; (attempt <= S4_CAL_RETRIES) && !b_ok; attempt++)
+    for (count = 0u; count < S4_CAL_SAMPLES; count++)
     {
-        sum_x = 0;
-        sum_y = 0;
-        min_x = 32767;
-        max_x = -32768;
-
-        for (count = 0u; count < S4_CAL_SAMPLES; count++)
+        (void)tk_dly_tsk(5);
+        if (read_fifo(buf, 1u) <= 0)
         {
-            (void)tk_dly_tsk(5);
-            if (read_fifo(buf, 1u) <= 0)
-            {
-                break;
-            }
-            axis_x = (int32_t)get_axis(&buf[0]);
-            sum_x += axis_x;
-            sum_y += (int32_t)get_axis(&buf[2]);
-            min_x  = (axis_x < min_x) ? axis_x : min_x;
-            max_x  = (axis_x > max_x) ? axis_x : max_x;
+            break;
         }
+        axis_x = (int32_t)get_axis(&buf[0]);
+        sum_x += axis_x;
+        sum_y += (int32_t)get_axis(&buf[2]);
+        min_x  = (axis_x < min_x) ? axis_x : min_x;
+        max_x  = (axis_x > max_x) ? axis_x : max_x;
+    }
 
-        if ((S4_CAL_SAMPLES == count)
-            && (to_milli_g(max_x - min_x) <= S4_CAL_MAX_SPREAD_MG))
+    cal_samples   = count;
+    cal_spread_mg = (0u == count) ? 0 : to_milli_g(max_x - min_x);
+
+    if ((S4_CAL_SAMPLES == count) && (cal_spread_mg <= S4_CAL_MAX_SPREAD_MG))
+    {
+        offset_x = (int16_t)(sum_x / (int32_t)S4_CAL_SAMPLES);
+        offset_y = (int16_t)(sum_y / (int32_t)S4_CAL_SAMPLES);
+        b_ok     = true;
+    }
+
+    return (b_ok);
+}
+
+/*
+ * Boot calibration.  The car is usually still being handled right after
+ * power-up (USB plugged in, car put on the line), and a single attempt
+ * then fails on movement -- the bench logs showed IMU_FAULT on most
+ * boots.  Keep trying for S4_CAL_WINDOW_MS (the Controller's own 3 s
+ * line calibration also needs the car still, so it settles in that
+ * window), and say why if it never succeeds.
+ */
+static bool calibrate_at_boot(void)
+{
+    uint32_t start_ms = app_now_ms();
+    bool     b_ok     = false;
+
+    while (!b_ok && ((app_now_ms() - start_ms) < S4_CAL_WINDOW_MS))
+    {
+        b_ok = calibrate();
+        if (!b_ok)
         {
-            offset_x = (int16_t)(sum_x / (int32_t)S4_CAL_SAMPLES);
-            offset_y = (int16_t)(sum_y / (int32_t)S4_CAL_SAMPLES);
-            b_ok     = true;
+            (void)tk_dly_tsk(200);
         }
+    }
+
+    if (b_ok)
+    {
+        tm_printf((UB*)"[S4] IMU calibrated (spread %d mg)\n",
+                  (INT)cal_spread_mg);
+    }
+    else if (S4_CAL_SAMPLES != cal_samples)
+    {
+        tm_printf((UB*)"[S4] IMU CAL FAILED: no data (%d of %d samples) "
+                       "-- check I2C wiring\n",
+                  (INT)cal_samples, (INT)S4_CAL_SAMPLES);
+    }
+    else
+    {
+        tm_printf((UB*)"[S4] IMU CAL FAILED: car moving (spread %d mg, "
+                       "limit %d) -- keep it still at power-up\n",
+                  (INT)cal_spread_mg, (INT)S4_CAL_MAX_SPREAD_MG);
     }
 
     return (b_ok);
@@ -415,7 +458,14 @@ static void process_batch(const uint8_t *p_buf, uint8_t count)
         impact_run = 0u;
     }
 
-    if (b_driving && detect_impact(p_buf, count))
+    if (!b_calibrated)
+    {
+        /* Uncalibrated: tilt and jolts cannot be trusted, and IMU_FAULT
+           (DEGRADE) is already set.  Never E-STOP on this data. */
+        impact_run    = 0u;
+        tilt_debounce = 0u;
+    }
+    else if (b_driving && detect_impact(p_buf, count))
     {
         fault_set(FAULT_COLLISION);
         state      = S4_COLLISION;
@@ -431,7 +481,8 @@ static void process_batch(const uint8_t *p_buf, uint8_t count)
         {
             fault_set(FAULT_TILT);
             state = S4_TILT_FAULT;
-            tm_printf((UB*)"[S4] TILT: %d deg\n", (INT)tilt_deg);
+            tm_printf((UB*)"[S4] TILT: %d deg (fault above %d)\n",
+                      (INT)tilt_deg, (INT)S4_TILT_FAULT_DEG);
         }
     }
     else
@@ -507,7 +558,8 @@ EXPORT void imu_task(INT stacd, void *p_exinf)
     (void)p_exinf;
 
     state = S4_INIT_CAL;
-    if (calibrate())
+    b_calibrated = calibrate_at_boot();
+    if (b_calibrated)
     {
         state = S4_IDLE;
     }

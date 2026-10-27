@@ -29,7 +29,7 @@ It ends with `=== X/X checks passed ===`; any `FAIL:` line names the check and t
 | CMake (Pico VS Code) | preset **"Self-test: Buddy 4 only"** (`test-b4`) |
 | make | `make TEST_BUDDY=4 -j8` |
 
-Flash `mtk3pico_smp1_usb_cdc_wifi_test_b4.uf2` and open the serial monitor. The firmware waits 4 s for the boot calibration, then prints `[TEST] === test run start: Buddy 4 only ===` and your `[TEST-S4]` lines. Look for `PASS` / `FAIL` on each.
+Flash `mtk3pico_smp1_usb_cdc_wifi_test_b4.uf2` and open the serial monitor. The firmware waits for the boot calibration to finish (`[S5] READY`), then prints `[TEST] === test run start: Buddy 4 only ===` and your `[TEST-S4]` lines. Look for `PASS` / `FAIL` on each.
 
 ## Host tests (`make test4`)
 

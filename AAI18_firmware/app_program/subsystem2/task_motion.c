@@ -78,6 +78,7 @@ static uint32_t encoder_total    = 0u;  /* |left| + |right|, for FR9    */
 
 static int32_t  target_left   = 0;
 static int32_t  target_right  = 0;
+static bool     b_window_one_wheel = false;    /* see check_encoders() */
 static uint32_t drive_start_us = 0u;    /* arms the stall detector      */
 
 static uint32_t window_start_ms    = 0u;
@@ -211,12 +212,30 @@ static void check_encoders(const gpio_irq_encoders_t *p_enc)
     uint32_t left;
     uint32_t right;
 
+    int32_t  duty_l = 0;
+    int32_t  duty_r = 0;
+
+    /* A wheel deliberately stopped (a pivot turn) gives no edges by
+       design: such a window proves nothing about its encoder. */
+    motor_get_applied(&duty_l, &duty_r);
+    duty_l = (duty_l < 0) ? -duty_l : duty_l;
+    duty_r = (duty_r < 0) ? -duty_r : duty_r;
+    if ((duty_l < (int32_t)S2_STALL_DUTY_PCT)
+        || (duty_r < (int32_t)S2_STALL_DUTY_PCT))
+    {
+        b_window_one_wheel = true;
+    }
+
     if ((app_now_ms() - window_start_ms) >= S2_ENC_WINDOW_MS)
     {
         left  = p_enc->edges_left  - window_edges_left;
         right = p_enc->edges_right - window_edges_right;
 
-        if ((left >= S2_ENC_FAULT_EDGES) && (0u == right))
+        if (b_window_one_wheel)
+        {
+            /* Not both wheels driven all window: no verdict. */
+        }
+        else if ((left >= S2_ENC_FAULT_EDGES) && (0u == right))
         {
             ctl = ctl | CTL_ENC_R_BAD_BIT;
             fault_set(FAULT_ENCODER);
@@ -232,6 +251,7 @@ static void check_encoders(const gpio_irq_encoders_t *p_enc)
         }
 
         arm_drive(p_enc);
+        b_window_one_wheel = false;
     }
 }
 
@@ -504,6 +524,19 @@ static void handle_command(const msg_motion_cmd_t *p_cmd,
     }
 }
 
+/* Larger of the two wheels' applied duty magnitudes, percent. */
+static uint8_t applied_max_duty(void)
+{
+    int32_t left  = 0;
+    int32_t right = 0;
+
+    motor_get_applied(&left, &right);
+    left  = (left  < 0) ? -left  : left;
+    right = (right < 0) ? -right : right;
+
+    return ((uint8_t)((left > right) ? left : right));
+}
+
 /*
  * One step of the state machine.  Returns the duty being commanded.
  */
@@ -549,7 +582,10 @@ static uint8_t step_state(const gpio_irq_encoders_t *p_enc)
         break;
     }
 
-    if ((0u != duty) && is_stalled(p_enc, duty))
+    /* Stall is judged on the duty the wheels ACTUALLY get (after the
+       slew limit, one wheel stopped in a pivot), not the cruise
+       setpoint: a 25% pivot was flagged as a 40% stall. */
+    if ((0u != duty) && is_stalled(p_enc, applied_max_duty()))
     {
         motor_brake();
         fault_set(FAULT_MOTOR_STALL);

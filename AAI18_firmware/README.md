@@ -63,7 +63,7 @@ the on-car test, the bench checks still owed, and the settings to tune.
 | 5 | `subsystem5/` Obstacle + Controller | `make test5` | `test-b5` / `make TEST_BUDDY=5` |
 
 A `TEST_BUDDY=N` image is `mtk3pico_smp1_usb_cdc_wifi_test_bN.uf2`. The
-whole car runs as normal; after the 4 s boot calibration only Buddy N's
+whole car runs as normal; once the boot calibration has finished, only Buddy N's
 `subsystemN_test()` runs. Some tests are hands-on and say so on the
 console (slide the car across the line, tilt it, move a hand in front).
 `TEST=1` still runs every buddy's test in one image.

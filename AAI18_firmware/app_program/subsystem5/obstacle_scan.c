@@ -59,6 +59,7 @@ static uint8_t  scan_step     = 0u;
 static uint8_t  missing_count = 0u;
 static uint8_t  dstop_count   = 0u;   /* readings in a row inside D_stop */
 static uint8_t  detect_count  = 0u;   /* readings in a row inside D_det  */
+static uint32_t run_start_ms  = 0u;   /* updated while NOT running        */
 static uint32_t last_echo_seq = 0u;
 static uint8_t  scan_cm[S5_FINE_STEPS];
 
@@ -530,6 +531,15 @@ EXPORT void obstacle_task(INT stacd, void *p_exinf)
             missing_count = 0u;
             dstop_count   = 0u;
             detect_count  = 0u;
+            run_start_ms  = app_now_ms();
+        }
+        else if ((app_now_ms() - run_start_ms) < S5_START_GRACE_MS)
+        {
+            /* Just started: the hand that pressed START is still in front
+               of the sensor (bench log: "obstacle at 6 cm" the moment the
+               car started).  Do not act on it. */
+            dstop_count  = 0u;
+            detect_count = 0u;
         }
         else
         {

@@ -8,8 +8,56 @@
 
 #include "subsystem5.h"
 #include "../fault.h"
+#include "../drivers/gpio_irq.h"
 
 #if APP_TEST
+
+/*
+ * When the range check fails, say WHY: count the ECHO pulses (GP1) that
+ * arrive in 1 s and look at the last one's width.  The sensor is pinged
+ * every 60 ms, so a working one gives ~16 pulses a second.
+ *   0 pulses        -> nothing on GP1 at all: wiring / power / TRIG
+ *   pulses, ~30 ms  -> echoes time out: nothing in range, or the sensor
+ *                      points at open space / is blocked by soft material
+ *   pulses, < 300us -> instant echo: TRIG/ECHO crosstalk or the sensor
+ *                      seeing its own mount
+ */
+static void echo_diagnosis(void)
+{
+    gpio_irq_echo_t first = {0};
+    gpio_irq_echo_t last  = {0};
+    uint32_t        pulses;
+
+    (void)gpio_irq_read_echo(&first);
+    (void)tk_dly_tsk(1000);
+    (void)gpio_irq_read_echo(&last);
+    pulses = last.seq - first.seq;
+
+    tm_printf((UB*)"[TEST-S5] diagnosis: %d echo pulses in 1 s, last "
+                   "width %d us\n", (INT)pulses, (INT)last.width_us);
+
+    if (0u == pulses)
+    {
+        tm_printf((UB*)"[TEST-S5]   NO ECHO AT ALL: check ECHO->GP1, "
+                       "TRIG->GP0 (not swapped), VCC and GND\n");
+    }
+    else if (last.width_us >= S5_ECHO_TIMEOUT_US)
+    {
+        tm_printf((UB*)"[TEST-S5]   echoes time out: nothing reflecting "
+                       "-- aim at a wall ~30 cm away\n");
+    }
+    else if (last.width_us < 300u)
+    {
+        tm_printf((UB*)"[TEST-S5]   instant echo: TRIG/ECHO wires "
+                       "touching, or the sensor sees its own mount\n");
+    }
+    else
+    {
+        tm_printf((UB*)"[TEST-S5]   echoes OK now (%d cm) -- move the hand "
+                       "slower next time\n",
+                  (INT)s5_echo_us_to_cm(last.width_us));
+    }
+}
 
 /*
  * For 6 s, print the forward distance twice a second while the tester
@@ -37,6 +85,11 @@ static void range_check(void)
 
     tm_printf((UB*)"[TEST-S5] %s: ultrasonic saw near (<20 cm) and far "
                    "(>30 cm)\n", (b_near && b_far) ? "PASS" : "FAIL");
+
+    if (!(b_near && b_far))
+    {
+        echo_diagnosis();
+    }
 }
 
 EXPORT void subsystem5_test(void)

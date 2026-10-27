@@ -41,6 +41,7 @@ static volatile uint16_t threshold_left   = (uint16_t)(S3_ADC_MAX / 2u);
 static volatile uint16_t threshold_centre = (uint16_t)(S3_ADC_MAX / 2u);
 static volatile uint16_t band_left        = (uint16_t)S3_HYSTERESIS;
 static volatile uint16_t band_centre      = (uint16_t)S3_HYSTERESIS;
+static volatile uint16_t black_centre     = 0u;   /* 0 = unknown */
 
 /* line_task private. */
 static bool    b_was_active  = false;
@@ -89,7 +90,8 @@ static bool is_dark(uint16_t value, uint16_t threshold, uint16_t band,
  * the car's LEFT (steer left), positive = to its right.  S3_SIDE_SIGN is
  * +1 when the side sensor is right of centre, -1 when left.  With only
  * two sensors the error is coarse (a Week 6 review risk that remains):
- *   centre only     ->   0                  centred
+ *   centre only     ->   0 .. +-40 toward the blind side, from how far
+ *                      the centre reading has fallen from full black
  *   centre + side   -> +-20 toward the side  slightly off
  *   side only       -> +-50 toward the side  well off
  *   neither         -> +-63 keep turning the way we last were; from
@@ -98,7 +100,31 @@ static bool is_dark(uint16_t value, uint16_t threshold, uint16_t band,
  *
  * (b_left_dark is the GP26 channel, wherever it is mounted.)
  */
-static int8_t compute_error(bool *pb_any_line)
+/*
+ * Edge error for "centre on the line, side sensor white": 0 while the
+ * centre reads full black, rising to S3_EDGE_MAX_ERROR as it falls to its
+ * threshold, signed toward the blind side.
+ */
+static int8_t edge_error(uint16_t centre_value)
+{
+    int32_t span  = (int32_t)black_centre - (int32_t)threshold_centre;
+    int32_t short_by = (int32_t)black_centre - (int32_t)centre_value;
+    int32_t magnitude = 0;
+
+    if ((span > 0) && (short_by > 0))
+    {
+        magnitude = (short_by * S3_EDGE_MAX_ERROR) / span;
+        if (magnitude > S3_EDGE_MAX_ERROR)
+        {
+            magnitude = S3_EDGE_MAX_ERROR;
+        }
+    }
+
+    /* Blind side is opposite the side sensor. */
+    return ((int8_t)(-magnitude * S3_SIDE_SIGN));
+}
+
+static int8_t compute_error(uint16_t centre_value, bool *pb_any_line)
 {
     int8_t error;
 
@@ -110,7 +136,7 @@ static int8_t compute_error(bool *pb_any_line)
     }
     else if (b_centre_dark)
     {
-        error = 0;
+        error = edge_error(centre_value);
     }
     else if (b_left_dark)
     {
@@ -158,11 +184,15 @@ static void track_once(void)
     if (adc_sampler_read(ADC_CH_LINE_L, &s_left)
         && adc_sampler_read(ADC_CH_LINE_C, &s_centre))
     {
-        b_left_dark   = is_dark(s_left.value, threshold_left, band_left,
-                                b_left_dark);
-        b_centre_dark = is_dark(s_centre.value, threshold_centre,
-                                band_centre, b_centre_dark);
-        error         = compute_error(&b_any_line);
+        /* A full-scale reading means nothing is under the sensor (the
+           car is lifted): never the line. */
+        b_left_dark   = (s_left.value < S3_AIR_LEVEL)
+                      && is_dark(s_left.value, threshold_left, band_left,
+                                 b_left_dark);
+        b_centre_dark = (s_centre.value < S3_AIR_LEVEL)
+                      && is_dark(s_centre.value, threshold_centre,
+                                 band_centre, b_centre_dark);
+        error         = compute_error(s_centre.value, &b_any_line);
 
         if (b_any_line)
         {
@@ -202,6 +232,7 @@ typedef struct
     uint16_t max_val;
     uint32_t sum;
     uint32_t taken;
+    uint32_t airborne;      /* samples ignored: nothing under the sensor */
 } cal_stats_t;
 
 /*
@@ -211,7 +242,15 @@ static void cal_accumulate(uint8_t channel, cal_stats_t *p_stats)
 {
     adc_sample_t sample;
 
-    if (adc_sampler_read(channel, &sample))
+    if (!adc_sampler_read(channel, &sample))
+    {
+        /* No sample yet: nothing to record. */
+    }
+    else if (sample.value >= S3_AIR_LEVEL)
+    {
+        p_stats->airborne = p_stats->airborne + 1u;
+    }
+    else
     {
         if (sample.value < p_stats->min_val)
         {
@@ -297,11 +336,16 @@ static void cal_barcode(const cal_stats_t *p_bc, uint32_t black_ref)
 
 EXPORT ER s3_calibrate(void)
 {
-    cal_stats_t stats[ADC_CH_COUNT];
-    uint32_t    count;
-    uint32_t    black_ref = 0u;
-    uint8_t     chan;
-    ER          ercd = E_OK;
+    cal_stats_t  stats[ADC_CH_COUNT];
+    adc_sample_t sample;
+    uint32_t     count;
+    uint32_t     tail_sum   = 0u;
+    uint32_t     tail_taken = 0u;
+    uint32_t     white_c;
+    uint32_t     white_s;
+    uint32_t     black_ref  = 0u;
+    uint8_t      chan;
+    ER           ercd = E_OK;
 
     for (chan = 0u; chan < ADC_CH_COUNT; chan++)
     {
@@ -309,11 +353,12 @@ EXPORT ER s3_calibrate(void)
         stats[chan].max_val = 0u;
         stats[chan].sum     = 0u;
         stats[chan].taken   = 0u;
+        stats[chan].airborne = 0u;
     }
 
     b_calibrating = true;
-    tm_printf((UB*)"[S3] calibrating for 3 s: centre sensor on the line, "
-                   "or sweep the car across it\n");
+    tm_printf((UB*)"[S3] calibrating for 3 s: slide across the line if you "
+                   "like, but END with the centre sensor on the line\n");
 
     for (count = 0u; count < S3_CAL_SAMPLES; count++)
     {
@@ -321,74 +366,86 @@ EXPORT ER s3_calibrate(void)
         {
             cal_accumulate(chan, &stats[chan]);
         }
+
+        /* The centre's BLACK level is taken from where the car sits at
+           the end, ready to start: the last S3_CAL_TAIL_SAMPLES. */
+        if (((count + S3_CAL_TAIL_SAMPLES) >= S3_CAL_SAMPLES)
+            && adc_sampler_read(ADC_CH_LINE_C, &sample)
+            && (sample.value < S3_AIR_LEVEL))
+        {
+            tail_sum   = tail_sum + sample.value;
+            tail_taken = tail_taken + 1u;
+        }
+
         (void)tk_dly_tsk((TMO)S3_CAL_INTERVAL_MS);
     }
 
     b_calibrating = false;
+
+    if ((0u != stats[ADC_CH_LINE_L].airborne)
+        || (0u != stats[ADC_CH_LINE_C].airborne))
+    {
+        tm_printf((UB*)"[S3] WARNING: car lifted during calibration "
+                       "(%d readings ignored) -- keep it on the surface\n",
+                  (INT)(stats[ADC_CH_LINE_L].airborne
+                        + stats[ADC_CH_LINE_C].airborne));
+    }
 
     tm_printf((UB*)"[S3] cal L %d..%d  C %d..%d  B %d..%d\n",
               (INT)stats[0].min_val, (INT)stats[0].max_val,
               (INT)stats[1].min_val, (INT)stats[1].max_val,
               (INT)stats[2].min_val, (INT)stats[2].max_val);
 
-    if (cal_swept(&stats[ADC_CH_LINE_C]))
-    {
-        /* CENTRE SWEPT: its own midpoint. */
-        threshold_centre = (uint16_t)(((uint32_t)stats[1].min_val
-                                       + stats[1].max_val) / 2u);
-        band_centre      = band_for((uint32_t)stats[1].max_val
-                                    - stats[1].min_val);
-        black_ref        = stats[ADC_CH_LINE_C].max_val;
-    }
-    else if (cal_mean(&stats[ADC_CH_LINE_C])
-             >= (cal_mean(&stats[ADC_CH_LINE_L]) + S3_MIN_CONTRAST))
-    {
-        /* CENTRE STATIC: sitting on the line.  Its white level is not
-           seen, so take the side sensor's white as the estimate. */
-        black_ref        = cal_mean(&stats[ADC_CH_LINE_C]);
-        threshold_centre = (uint16_t)((cal_mean(&stats[ADC_CH_LINE_L])
-                                       + black_ref) / 2u);
-        band_centre      = band_for(black_ref
-                                    - cal_mean(&stats[ADC_CH_LINE_L]));
-    }
-    else
+    /*
+     * WHITE levels: the lowest reading each sensor gave.  Sitting still
+     * with the side sensor on white that is its white; if the car was
+     * slid across, it is the white beside the line.  The centre's own
+     * white is only seen in a sweep; otherwise the side sensor's white
+     * stands in for it (measured: within ~50 counts of each other).
+     */
+    white_s = (0u != stats[ADC_CH_LINE_L].taken)
+            ? stats[ADC_CH_LINE_L].min_val : 0u;
+    white_c = cal_swept(&stats[ADC_CH_LINE_C])
+            ? stats[ADC_CH_LINE_C].min_val : white_s;
+
+    /*
+     * BLACK level of the centre: its mean over the last half second, where
+     * the car will start.  (Was: the maximum seen.  One high reading --
+     * the car tilted while being placed -- put the threshold ABOVE the
+     * line, so a car sitting on the line read white and drove off.)
+     */
+    black_ref = (0u != tail_taken) ? (tail_sum / tail_taken) : 0u;
+
+    if ((0u == stats[ADC_CH_LINE_L].taken)
+        || (black_ref < (white_c + S3_MIN_CONTRAST)))
     {
         ercd = E_IO;
     }
-
-    if (E_OK != ercd)
-    {
-        /* Centre sensor saw no line at all. */
-    }
-    else if (cal_swept(&stats[ADC_CH_LINE_L]))
-    {
-        /* SIDE SWEPT: its own midpoint. */
-        threshold_left = (uint16_t)(((uint32_t)stats[0].min_val
-                                     + stats[0].max_val) / 2u);
-        band_left      = band_for((uint32_t)stats[0].max_val
-                                  - stats[0].min_val);
-    }
     else
     {
-        /* SIDE STATIC: only its white level is known. */
-        threshold_left = (uint16_t)(cal_mean(&stats[ADC_CH_LINE_L])
-                                    + S3_SIDE_STATIC_OFFSET);
+        black_centre     = (uint16_t)black_ref;
+        threshold_centre = (uint16_t)((white_c + black_ref) / 2u);
+        band_centre      = band_for(black_ref - white_c);
+
+        /* Side: white + a fixed margin.  Its black is never reliably
+           seen (it starts on white), and its maximum is as vulnerable to
+           a stray high reading as the centre's was. */
+        threshold_left = (uint16_t)(white_s + S3_SIDE_STATIC_OFFSET);
         band_left      = band_for(2u * S3_SIDE_STATIC_OFFSET);
     }
 
     if (E_OK == ercd)
     {
-        tm_printf((UB*)"[S3] thresholds: side %d (+-%d%s)  centre %d "
-                       "(+-%d%s)\n",
-                  (INT)threshold_left, (INT)(band_left / 2u),
-                  cal_swept(&stats[ADC_CH_LINE_L]) ? ", swept" : "",
-                  (INT)threshold_centre, (INT)(band_centre / 2u),
-                  cal_swept(&stats[ADC_CH_LINE_C]) ? ", swept" : "");
+        tm_printf((UB*)"[S3] thresholds: side %d (white %d)  centre %d "
+                       "(white %d, black %d)\n",
+                  (INT)threshold_left, (INT)white_s,
+                  (INT)threshold_centre, (INT)white_c, (INT)black_ref);
     }
     else
     {
-        tm_printf((UB*)"[S3] CAL FAILED: put the centre sensor on the line "
-                       "(side sensor on white) or sweep across it\n");
+        tm_printf((UB*)"[S3] CAL FAILED: the centre sensor must END on the "
+                       "line (it read %d, white %d)\n",
+                  (INT)black_ref, (INT)white_c);
 
         /* "4095..0" on a channel means it produced no samples at all:
            print the ADC state so the cause is visible on the console. */
@@ -418,6 +475,7 @@ EXPORT void line_task(INT stacd, void *p_exinf)
             {
                 /* Rising edge of START: begin from a clean debounce. */
                 lost_count = 0u;
+                last_error = 0;     /* no turn direction left over */
             }
             track_once();
         }

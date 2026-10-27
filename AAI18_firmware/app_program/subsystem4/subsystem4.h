@@ -68,7 +68,7 @@
 #define S4_IMU_FAIL_LIMIT       (3u)    /* consecutive I2C errors        */
 #define S4_CAL_SAMPLES          (64u)   /* averaged for the offsets      */
 #define S4_CAL_MAX_SPREAD_MG    (60)    /* more movement = not held still*/
-#define S4_CAL_RETRIES          (2u)
+#define S4_CAL_WINDOW_MS        (6000u) /* keep retrying at boot this long */
 
 typedef enum
 {

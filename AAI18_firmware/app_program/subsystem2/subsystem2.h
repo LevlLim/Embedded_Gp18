@@ -72,7 +72,7 @@ typedef enum
 
 /* Spin turns (line search, barcode, bypass) run at no more than this, so
    the car can stop on the line instead of sweeping past it. */
-#define S2_TURN_DUTY_PCT        (25u)
+#define S2_TURN_DUTY_PCT        (32u)   /* 25 could not pivot the car */
 
 /* Stall detection: drive commanded above this duty with no encoder edge
    for this long means the wheel is not turning. */

@@ -154,6 +154,9 @@ EXPORT uint32_t app_now_ms(void)
 EXPORT INT usermain(void)
 {
     T_RVER ver;
+#if APP_TEST
+    uint32_t wait_ms;
+#endif
 
     (void)tk_ref_ver(&ver);
     tm_printf((UB*)"\n=== INF2004 Group AAI18 -- Autonomous Robot Car ===\n");
@@ -192,8 +195,16 @@ EXPORT INT usermain(void)
        tests exercise the real tasks. */
     /* Let the boot calibration (3 s, Vehicle Controller) finish first,
        so the tests do not run on top of it. */
-    tm_printf((UB*)"[TEST] waiting 4 s for the boot calibration...\n");
-    (void)tk_dly_tsk(4000);
+    /* Wait for the Controller to finish its boot calibration (READY or
+       FAULT), up to 15 s.  A fixed 4 s wait was not always enough, and
+       the tests then ran on top of the calibration. */
+    tm_printf((UB*)"[TEST] waiting for the boot calibration...\n");
+    for (wait_ms = 0u; (wait_ms < 15000u) && !s5_is_initialised();
+         wait_ms += 100u)
+    {
+        (void)tk_dly_tsk(100);
+    }
+    (void)tk_dly_tsk(500);      /* let its console lines print first */
 
     if (0 == APP_TEST_BUDDY)
     {
