@@ -164,7 +164,7 @@ static void check_dstop(uint8_t distance_cm)
         if (dstop_count >= S5_CONFIRM_PINGS)
         {
             dstop_count = 0u;
-            tm_printf((UB*)"[S5] D_STOP: obstacle at %d cm\n",
+            APP_LOG((UB*)"[S5] D_STOP: obstacle at %d cm\n",
                       (INT)distance_cm);
             fault_set(FAULT_OBSTACLE_STOP);
         }
@@ -232,7 +232,7 @@ static void step_coarse(ping_result_t result, uint8_t distance_cm)
     if (detect_count >= S5_CONFIRM_PINGS)
     {
         detect_count = 0u;
-        tm_printf((UB*)"[S5] obstacle at %d cm: stopping\n",
+        APP_LOG((UB*)"[S5] obstacle at %d cm: stopping\n",
                   (INT)distance_cm);
         s5_post_event(S5_EVT_OBSTACLE_SEEN);
         servo_point(0);

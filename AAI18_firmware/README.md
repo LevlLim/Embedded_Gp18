@@ -123,11 +123,29 @@ byte-identical `.uf2` files. Using your own full SDK instead: set
 `AAI18_PICO_SDK_PATH` in `CMakePresets.json`. There are no `uart` presets:
 GP0/GP1 carry the ultrasonic sensor, so the UART console is refused.
 
+### 4. Wireless console over Wi-Fi (MQTT)
+
+To read the car's console without a USB cable:
+
+1. Phone hotspot on **2.4 GHz** (or any WPA2 network with no username);
+   connect the laptop to it and note its IPv4 address (`ipconfig`).
+2. Copy `config\wifi_secrets.example.h` to `config\wifi_secrets.h` and set
+   `WIFI_SSID`, `WIFI_PASSWORD` and `MQTT_BROKER_IP` (the laptop's IP).
+   This file is git-ignored: never commit it.
+3. Install Mosquitto on the laptop, create `car.conf` with
+   `listener 1883 0.0.0.0` and `allow_anonymous true`, run
+   `mosquitto -c car.conf -v` (allow it through the firewall).
+4. Build the **`mqtt`** preset and flash its `.uf2`.
+5. Read the console: `mosquitto_sub -h localhost -t car18/log`
+   (every `[DBG]`, `[S3]`, `[S4]`, `[S5]` line, as on the USB console).
+   Binary telemetry is on `car18/tele/#`; commands go to `car18/cmd`.
+
 ### `template_patches/` — template files this project changes or adds
 
 | File | Change | Why |
 |---|---|---|
 | `config/config.h` | `CNF_TIMER_PERIOD` 10 → **1** | The 1 ms barcode and 5 ms line tasks cannot exist on a 10 ms tick. `app.h` refuses to compile until this is applied. |
+| `lib/liblwip/sysdepend/pico_rp2040/lwipopts.h` | `MQTT_OUTPUT_RINGBUF_SIZE` 256 → 1024 | Room for the `car18/log` text lines. |
 | `lib/liblwip/sysdepend/pico_rp2040/mqtt_utk.c` | Subscribes to `car18/cmd`; drains the telemetry outbox into `mqtt_publish()`; passes raw inbound bytes and link up/down to the application | lwIP is `NO_SYS` and owned by the radio task, so only that task may call it. Only used in `MQTT=1` builds. |
 | `CMakeLists.txt`, `CMakePresets.json`, `cmake/` | **New.** CMake/Ninja build equal to the makefile, plus a Python `elf2uf2`; presets `test-b1`..`test-b5` | Build on Windows with no WSL and no host C++ compiler. |
 | `build_make/pico_rp2040.mk` | Adds `TEST_BUDDY=0..5` (passes `APP_TEST_BUDDY`, names the image `_test_bN`) | One self-test image per buddy. |

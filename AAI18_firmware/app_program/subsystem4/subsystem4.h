@@ -89,6 +89,14 @@ typedef enum
    a peak from one hump with the SAT flag of another (FR5, rule R5). */
 uint8_t    s4_get_hump_packed(void);
 int8_t     s4_get_tilt_deg(void);
+
+/* Side-to-side tilt (roll), degrees, from the Y axis.  Which side is +
+   depends on how the IMU is mounted: check it with the [DBG] line. */
+int8_t     s4_get_roll_deg(void);
+
+/* Identify + configure the IMU (subsystem4.c).  True if it answered and
+   every register write succeeded. */
+bool       s4_configure_imu(bool b_verbose);
 s4_state_t s4_get_state(void);
 
 /* True when hump and peak reporting for this run is invalid, because

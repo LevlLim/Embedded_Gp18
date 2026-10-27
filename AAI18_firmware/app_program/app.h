@@ -197,6 +197,30 @@ IMPORT void subsystem4_test(void);
 IMPORT void subsystem5_test(void);
 #endif
 
+/* ---------------------------------------------------------------------
+ *  LOG LINES -- console AND Wi-Fi.
+ *  APP_LOG(fmt, ...) prints exactly like tm_printf, and in an MQTT build
+ *  also sends the line to topic car18/log, so the car's console can be
+ *  read on a laptop with no USB cable:
+ *      mosquitto_sub -h <broker> -t car18/log
+ *  Used for the event lines ([S3]..[S5], [DBG]); a line longer than
+ *  APP_LOG_MAX is cut short on Wi-Fi (the console gets it whole).
+ *  A macro (Barr-C deviation D5, as CHECK below) because the template's
+ *  printf has no va_list form to forward the arguments to.
+ * --------------------------------------------------------------------- */
+#define APP_LOG_MAX     (120u)
+
+IMPORT void app_log_line(const UB *p_text);     /* subsystem1 */
+
+#define APP_LOG(...)                                                    \
+    do                                                                  \
+    {                                                                   \
+        UB app_log_buf_[APP_LOG_MAX + 64u];                             \
+        app_log_buf_[0] = (UB)0;                                        \
+        (void)tm_sprintf(app_log_buf_, __VA_ARGS__);                    \
+        app_log_line(app_log_buf_);                                     \
+    } while (0)
+
 /* Print a readable message if a kernel call failed (negative error code).
    Kept as a macro (Barr-C 6.3a deviation D5) so the call site's text can
    be passed through unchanged. */

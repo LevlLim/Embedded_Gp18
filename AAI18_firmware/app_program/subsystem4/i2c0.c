@@ -47,6 +47,63 @@ static void i2c_pin_setup(uint32_t gpio)
     out_w(GPIO_CTRL(gpio), GPIO_FUNC_I2C);
 }
 
+/* Busy-wait a few microseconds (bus recovery only, at init / retry). */
+static void wait_us(uint32_t us)
+{
+    uint32_t start = RP2040_NOW_US();
+
+    while ((RP2040_NOW_US() - start) < us)
+    {
+        /* Spin. */
+    }
+}
+
+/*
+ * I2C BUS RECOVERY (I2C specification, "bus clear").  If the Pico resets
+ * in the middle of a read -- reflashing, the RESET button, a brown-out --
+ * while the IMU stays powered, the IMU can be left driving SDA low,
+ * waiting for clock pulses that never come.  Every later transfer then
+ * fails ("IMU not answering on I2C") until the IMU loses power.  Clock
+ * SCL by hand, as a GPIO, up to 9 times until SDA is released, then send
+ * a STOP.  Returns true if SDA is high (bus free) at the end.
+ */
+static bool bus_clear(void)
+{
+    uint32_t pulse;
+    bool     b_free;
+
+    /* Both lines as plain GPIO with pull-ups: SDA input, SCL output. */
+    set_w(PADS_GPIO(PIN_IMU_SDA), PADS_IE | PADS_PUE);
+    set_w(PADS_GPIO(PIN_IMU_SCL), PADS_IE | PADS_PUE);
+    (void)gpio_set_pin(PIN_IMU_SDA, GPIO_MODE_IN);
+    (void)gpio_set_val(PIN_IMU_SCL, 1u);
+    (void)gpio_set_pin(PIN_IMU_SCL, GPIO_MODE_OUT);
+    wait_us(10u);
+
+    for (pulse = 0u; (pulse < 9u) && (0u == gpio_get_val(PIN_IMU_SDA));
+         pulse++)
+    {
+        (void)gpio_set_val(PIN_IMU_SCL, 0u);
+        wait_us(5u);
+        (void)gpio_set_val(PIN_IMU_SCL, 1u);
+        wait_us(5u);
+    }
+
+    /* STOP: SDA low -> high while SCL is high. */
+    (void)gpio_set_val(PIN_IMU_SCL, 0u);
+    (void)gpio_set_val(PIN_IMU_SDA, 0u);
+    (void)gpio_set_pin(PIN_IMU_SDA, GPIO_MODE_OUT);
+    wait_us(5u);
+    (void)gpio_set_val(PIN_IMU_SCL, 1u);
+    wait_us(5u);
+    (void)gpio_set_pin(PIN_IMU_SDA, GPIO_MODE_IN);   /* release: pull-up */
+    wait_us(5u);
+
+    b_free = (0u != gpio_get_val(PIN_IMU_SDA));
+
+    return (b_free);
+}
+
 /*
  * Abort and reset the controller so the next call starts clean.
  */
@@ -216,12 +273,29 @@ EXPORT ER i2c0_init(void)
 
     out_w(I2C_ENABLE, 1u);
 
+    /* Free a bus left stuck by a reset mid-transfer, then hand the pins
+       to the I2C block. */
+    (void)bus_clear();
     i2c_pin_setup(PIN_IMU_SDA);
     i2c_pin_setup(PIN_IMU_SCL);
 
     b_initialised = true;
 
     return (E_OK);
+}
+
+EXPORT bool i2c0_bus_reset(void)
+{
+    bool b_free;
+
+    out_w(I2C_ENABLE, 0u);
+    b_free = bus_clear();
+    i2c_pin_setup(PIN_IMU_SDA);
+    i2c_pin_setup(PIN_IMU_SCL);
+    (void)in_w(I2C_CLR_INTR);
+    out_w(I2C_ENABLE, 1u);
+
+    return (b_free);
 }
 
 EXPORT ER i2c0_write_read(uint8_t addr, const uint8_t *p_tx, uint8_t tx_len,

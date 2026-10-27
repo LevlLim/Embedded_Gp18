@@ -33,7 +33,8 @@ static volatile bool b_reset_request = false;
 
 /* Read by other tasks: each is one byte, so each read is whole. */
 static volatile s4_state_t state         = S4_INIT_CAL;
-static volatile int8_t     tilt_deg      = 0;
+static volatile int8_t     tilt_deg      = 0;   /* pitch: + nose up      */
+static volatile int8_t     roll_deg      = 0;   /* roll: side to side    */
 static volatile uint8_t    hump_packed   = 0u;   /* msg_pack_hump()  */
 static volatile bool       b_run_invalid = false;
 
@@ -198,23 +199,38 @@ static bool calibrate_at_boot(void)
         if (!b_ok)
         {
             (void)tk_dly_tsk(200);
+
+            /* No data at all: the IMU was probably not configured (it
+               did not answer at power-up).  Configure it again. */
+            if (0u == cal_samples)
+            {
+                (void)s4_configure_imu(false);
+            }
         }
     }
 
     if (b_ok)
     {
-        tm_printf((UB*)"[S4] IMU calibrated (spread %d mg)\n",
+        APP_LOG((UB*)"[S4] IMU calibrated (spread %d mg)\n",
                   (INT)cal_spread_mg);
     }
     else if (S4_CAL_SAMPLES != cal_samples)
     {
-        tm_printf((UB*)"[S4] IMU CAL FAILED: no data (%d of %d samples) "
-                       "-- check I2C wiring\n",
-                  (INT)cal_samples, (INT)S4_CAL_SAMPLES);
+        if (!s4_configure_imu(false))
+        {
+            APP_LOG((UB*)"[S4] IMU CAL FAILED: IMU not answering on I2C "
+                         "-- check SDA GP16, SCL GP17, VCC, GND\n");
+        }
+        else
+        {
+            APP_LOG((UB*)"[S4] IMU CAL FAILED: IMU answers but sends no "
+                         "samples (%d of %d)\n",
+                    (INT)cal_samples, (INT)S4_CAL_SAMPLES);
+        }
     }
     else
     {
-        tm_printf((UB*)"[S4] IMU CAL FAILED: car moving (spread %d mg, "
+        APP_LOG((UB*)"[S4] IMU CAL FAILED: car moving (spread %d mg, "
                        "limit %d) -- keep it still at power-up\n",
                   (INT)cal_spread_mg, (INT)S4_CAL_MAX_SPREAD_MG);
     }
@@ -370,12 +386,18 @@ static void update_tilt(const uint8_t *p_buf, uint8_t count)
 {
     uint32_t base = ((uint32_t)count - 1u) * S4_BYTES_PER_SAMPLE;
     int32_t  ax_mg;
+    int32_t  ay_mg;
     int32_t  az_mg;
 
     ax_mg = to_milli_g((int32_t)get_axis(&p_buf[base]) - (int32_t)offset_x);
+    ay_mg = to_milli_g((int32_t)get_axis(&p_buf[base + 2u])
+                       - (int32_t)offset_y);
     az_mg = to_milli_g((int32_t)get_axis(&p_buf[base + 4u]));
 
+    /* Same atan maths for both axes: pitch from X (front-back), roll
+       from Y (side to side), each against Z. */
     tilt_deg = s4_pitch_deg(ax_mg, az_mg);
+    roll_deg = s4_pitch_deg(ay_mg, az_mg);
 }
 
 /*
@@ -470,19 +492,23 @@ static void process_batch(const uint8_t *p_buf, uint8_t count)
         fault_set(FAULT_COLLISION);
         state      = S4_COLLISION;
         impact_run = 0u;
-        tm_printf((UB*)"[S4] COLLISION: x %d mg  y %d mg (%d samples)\n",
+        APP_LOG((UB*)"[S4] COLLISION: x %d mg  y %d mg (%d samples)\n",
                   (INT)impact_peak_x, (INT)impact_peak_y,
                   (INT)S4_IMPACT_SAMPLES);
     }
-    else if ((tilt_deg > S4_TILT_FAULT_DEG) || (tilt_deg < -S4_TILT_FAULT_DEG))
+    else if ((tilt_deg > S4_TILT_FAULT_DEG) || (tilt_deg < -S4_TILT_FAULT_DEG)
+             || (roll_deg > S4_TILT_FAULT_DEG)
+             || (roll_deg < -S4_TILT_FAULT_DEG))
     {
+        /* Tipped over front-back OR sideways. */
         tilt_debounce = (uint8_t)(tilt_debounce + 1u);
         if (tilt_debounce > S4_DEBOUNCE_SAMPLES)
         {
             fault_set(FAULT_TILT);
             state = S4_TILT_FAULT;
-            tm_printf((UB*)"[S4] TILT: %d deg (fault above %d)\n",
-                      (INT)tilt_deg, (INT)S4_TILT_FAULT_DEG);
+            APP_LOG((UB*)"[S4] TILT: pitch %d roll %d deg (fault above "
+                         "%d)\n", (INT)tilt_deg, (INT)roll_deg,
+                      (INT)S4_TILT_FAULT_DEG);
         }
     }
     else
@@ -622,6 +648,11 @@ EXPORT void imu_task(INT stacd, void *p_exinf)
 EXPORT uint8_t s4_get_hump_packed(void)
 {
     return (hump_packed);
+}
+
+EXPORT int8_t s4_get_roll_deg(void)
+{
+    return (roll_deg);
 }
 
 EXPORT int8_t s4_get_tilt_deg(void)

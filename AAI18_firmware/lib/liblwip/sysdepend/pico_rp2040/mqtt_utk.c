@@ -34,7 +34,7 @@ extern void app_mqtt_link_state(int connected);
 
 #define AAI18_CMD_TOPIC		"car18/cmd"
 #define AAI18_OUTBOX_POLL_MS	20	/* drains the 5 Hz telemetry promptly */
-#define AAI18_PAYLOAD_MAX	32
+#define AAI18_PAYLOAD_MAX	128	/* a car18/log text line (APP_LOG_MAX 120) */
 
 #define MQTT_UTK_HEARTBEAT_MS   5000
 #define MQTT_UTK_KEEPALIVE_S    60

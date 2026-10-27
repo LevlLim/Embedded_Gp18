@@ -112,7 +112,7 @@ static void send(msg_cmd_type_t type, uint32_t arg)
 
     if (E_OK != s2_send_command(&cmd))
     {
-        tm_printf((UB*)"[S5] motion queue full, cmd %d lost\n", (INT)type);
+        APP_LOG((UB*)"[S5] motion queue full, cmd %d lost\n", (INT)type);
     }
 }
 
@@ -134,7 +134,7 @@ static void enter_running(void)
     s4_set_active(true);
     avoid_retries = 0u;
     enter_line_follow();
-    tm_printf((UB*)"[S5] RUNNING\n");
+    APP_LOG((UB*)"[S5] RUNNING\n");
 }
 
 static void enter_halted(s5_parent_t parent)
@@ -268,7 +268,7 @@ static void handle_profile(void)
     {
         /* ABORT: retries exhausted.  Stop and report through the Fault
            Table so the operator sees why. */
-        tm_printf((UB*)"[S5] bypass aborted after %d retries\n",
+        APP_LOG((UB*)"[S5] bypass aborted after %d retries\n",
                   (INT)avoid_retries);
         fault_set(FAULT_OBSTACLE_STOP);
     }
@@ -337,7 +337,7 @@ static void handle_barcode(void)
     b_got = s3_take_barcode(&bc);
     if (b_got)
     {
-        tm_printf((UB*)"[S5] barcode cmd %d conf %d%s\n", (INT)bc.cmd,
+        APP_LOG((UB*)"[S5] barcode cmd %d conf %d%s\n", (INT)bc.cmd,
                   (INT)bc.confidence,
                   (bc.confidence >= VC_MIN_CONFIDENCE) ? "" : " (ignored)");
     }
@@ -436,13 +436,13 @@ static void handle_faults(uint16_t bits)
 
     if ((0u != hard) && (S5_PARENT_FAULT != parent))
     {
-        tm_printf((UB*)"[S5] E-STOP: mask 0x%03x\n", (INT)bits);
+        APP_LOG((UB*)"[S5] E-STOP: mask 0x%03x\n", (INT)bits);
         enter_halted(S5_PARENT_FAULT);
     }
     else if ((0u != ((uint32_t)bits & FAULT_REMOTE_STOP))
              && (S5_PARENT_RUNNING == parent))
     {
-        tm_printf((UB*)"[S5] STOPPED\n");
+        APP_LOG((UB*)"[S5] STOPPED\n");
         enter_halted(S5_PARENT_STOPPED);
     }
     else
@@ -475,7 +475,7 @@ static void do_reset(void)
     }
 
     enter_halted(b_cal_ok ? S5_PARENT_READY : S5_PARENT_FAULT);
-    tm_printf((UB*)"[S5] RESET -> %s\n", b_cal_ok ? "READY" : "FAULT");
+    APP_LOG((UB*)"[S5] RESET -> %s\n", b_cal_ok ? "READY" : "FAULT");
 }
 
 static void do_start(void)
@@ -605,12 +605,12 @@ EXPORT void controller_task(INT stacd, void *p_exinf)
     if (b_cal_ok)
     {
         enter_halted(S5_PARENT_READY);
-        tm_printf((UB*)"[S5] READY -- press START or publish a command\n");
+        APP_LOG((UB*)"[S5] READY -- press START or publish a command\n");
     }
     else
     {
         enter_halted(S5_PARENT_FAULT);
-        tm_printf((UB*)"[S5] self-test failed: press START to retry\n");
+        APP_LOG((UB*)"[S5] self-test failed: press START to retry\n");
     }
 
     for (;;)

@@ -54,6 +54,13 @@ ER i2c0_write_reg(uint8_t addr, uint8_t reg, uint8_t value);
    in telemetry so a flaky bus is visible rather than silent. */
 uint32_t i2c0_error_count(void);
 
+/*
+ * Free a bus held low by the IMU (bus clear: up to 9 clock pulses, then a
+ * STOP) and restart the I2C block.  Returns true if SDA is free after.
+ * Also done once by i2c0_init().  Not for use while a transfer runs.
+ */
+bool i2c0_bus_reset(void);
+
 #endif /* I2C0_H */
 
 /* end of file */

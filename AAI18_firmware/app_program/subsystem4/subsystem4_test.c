@@ -10,37 +10,39 @@
 #if APP_TEST
 
 /*
- * For 6 s, print the tilt twice a second while the tester lifts the
- * car's nose and then its tail.  PASS if the readings spread over at
- * least 20 degrees (about +10 to -10).
+ * For 6 s, print pitch and roll twice a second while the tester tilts the
+ * car as asked.  PASS if the chosen angle spreads over at least 20
+ * degrees (about +10 to -10).
  */
-static void tilt_check(void)
+static void angle_check(bool b_roll, const char *p_instruction)
 {
-    int32_t  tilt;
+    int32_t  angle;
     int32_t  lowest  = 127;
     int32_t  highest = -128;
     uint32_t tick;
 
-    tm_printf((UB*)"[TEST-S4] LIFT THE NOSE, THEN THE TAIL (6 s)\n");
+    tm_printf((UB*)"[TEST-S4] %s (6 s)\n", p_instruction);
 
     for (tick = 0u; tick < 12u; tick++)
     {
         (void)tk_dly_tsk(500);
-        tilt    = (int32_t)s4_get_tilt_deg();
-        lowest  = (tilt < lowest)  ? tilt : lowest;
-        highest = (tilt > highest) ? tilt : highest;
-        tm_printf((UB*)"[TEST-S4]   tilt %d deg\n", (INT)tilt);
+        angle   = b_roll ? (int32_t)s4_get_roll_deg()
+                         : (int32_t)s4_get_tilt_deg();
+        lowest  = (angle < lowest)  ? angle : lowest;
+        highest = (angle > highest) ? angle : highest;
+        tm_printf((UB*)"[TEST-S4]   pitch %d  roll %d deg\n",
+                  (INT)s4_get_tilt_deg(), (INT)s4_get_roll_deg());
     }
 
     if ((highest - lowest) >= 20)
     {
-        tm_printf((UB*)"[TEST-S4] PASS: tilt range %d..%d deg\n",
-                  (INT)lowest, (INT)highest);
+        tm_printf((UB*)"[TEST-S4] PASS: %s range %d..%d deg\n",
+                  b_roll ? "roll" : "pitch", (INT)lowest, (INT)highest);
     }
     else
     {
-        tm_printf((UB*)"[TEST-S4] FAIL: tilt only %d..%d deg -- IMU "
-                       "stuck or car not tilted\n",
+        tm_printf((UB*)"[TEST-S4] FAIL: %s only %d..%d deg -- IMU stuck "
+                       "or car not tilted\n", b_roll ? "roll" : "pitch",
                   (INT)lowest, (INT)highest);
     }
 }
@@ -96,7 +98,8 @@ EXPORT void subsystem4_test(void)
               (INT)s4_get_tilt_deg(), (INT)s4_get_state());
 
     /* ---- hands-on: tilt follows the car ---- */
-    tilt_check();
+    angle_check(false, "LIFT THE NOSE, THEN THE TAIL");
+    angle_check(true,  "TIP THE CAR LEFT, THEN RIGHT");
 }
 
 #endif /* APP_TEST */

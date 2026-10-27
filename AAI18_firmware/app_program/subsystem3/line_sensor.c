@@ -326,7 +326,7 @@ static void cal_barcode(const cal_stats_t *p_bc, uint32_t black_ref)
     if (0u != threshold)
     {
         s3_set_barcode_threshold((uint16_t)threshold);
-        tm_printf((UB*)"[S3] barcode threshold %d\n", (INT)threshold);
+        APP_LOG((UB*)"[S3] barcode threshold %d\n", (INT)threshold);
     }
 }
 
@@ -357,7 +357,7 @@ EXPORT ER s3_calibrate(void)
     }
 
     b_calibrating = true;
-    tm_printf((UB*)"[S3] calibrating for 3 s: slide across the line if you "
+    APP_LOG((UB*)"[S3] calibrating for 3 s: slide across the line if you "
                    "like, but END with the centre sensor on the line\n");
 
     for (count = 0u; count < S3_CAL_SAMPLES; count++)
@@ -385,13 +385,13 @@ EXPORT ER s3_calibrate(void)
     if ((0u != stats[ADC_CH_LINE_L].airborne)
         || (0u != stats[ADC_CH_LINE_C].airborne))
     {
-        tm_printf((UB*)"[S3] WARNING: car lifted during calibration "
+        APP_LOG((UB*)"[S3] WARNING: car lifted during calibration "
                        "(%d readings ignored) -- keep it on the surface\n",
                   (INT)(stats[ADC_CH_LINE_L].airborne
                         + stats[ADC_CH_LINE_C].airborne));
     }
 
-    tm_printf((UB*)"[S3] cal L %d..%d  C %d..%d  B %d..%d\n",
+    APP_LOG((UB*)"[S3] cal L %d..%d  C %d..%d  B %d..%d\n",
               (INT)stats[0].min_val, (INT)stats[0].max_val,
               (INT)stats[1].min_val, (INT)stats[1].max_val,
               (INT)stats[2].min_val, (INT)stats[2].max_val);
@@ -436,14 +436,14 @@ EXPORT ER s3_calibrate(void)
 
     if (E_OK == ercd)
     {
-        tm_printf((UB*)"[S3] thresholds: side %d (white %d)  centre %d "
+        APP_LOG((UB*)"[S3] thresholds: side %d (white %d)  centre %d "
                        "(white %d, black %d)\n",
                   (INT)threshold_left, (INT)white_s,
                   (INT)threshold_centre, (INT)white_c, (INT)black_ref);
     }
     else
     {
-        tm_printf((UB*)"[S3] CAL FAILED: the centre sensor must END on the "
+        APP_LOG((UB*)"[S3] CAL FAILED: the centre sensor must END on the "
                        "line (it read %d, white %d)\n",
                   (INT)black_ref, (INT)white_c);
 

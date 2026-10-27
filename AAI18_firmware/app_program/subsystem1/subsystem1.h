@@ -36,20 +36,24 @@
 #define S1_TOPIC_STATE      "car18/tele/state"
 #define S1_TOPIC_HEARTBEAT  "car18/tele/hb"
 #define S1_TOPIC_FAULT      "car18/tele/fault"
+#define S1_TOPIC_LOG        "car18/log"         /* console lines, text */
 #define S1_TOPIC_CMD        "car18/cmd"
 
 /* Topic codes carried in the first byte of an outbox message. */
 #define S1_TOPIC_ID_STATE      (0u)
 #define S1_TOPIC_ID_HEARTBEAT  (1u)
 #define S1_TOPIC_ID_FAULT      (2u)
+#define S1_TOPIC_ID_LOG        (3u)
 
 #define S1_HEARTBEAT_MS     (1000u)
 
 /* READABLE DEBUG LINE (console builds only).  1 = every 200 ms print
-     [DBG] side  210/ 300 W  ctr 1000/ 570 B  err   0 ok  duty L 40 R 40
+     [DBG] side 210/300 W  ctr 1000/570 B  err 0 ok  duty L 40 R 40
+           pitch 0 roll 0     (all on one line)
    instead of the hex state frame, so the sensors and steering can be
    watched directly -- including by sliding the parked car across the
-   line by hand.  0 = the hex frame, as before. */
+   line by hand.  0 = the hex frame, as before.  In an MQTT build the
+   line also goes to topic car18/log (wireless console). */
 #define S1_DEBUG_PRINT      (1)
 #define S1_RECONNECT_TARGET_MS (10000u)  /* NFR6 */
 

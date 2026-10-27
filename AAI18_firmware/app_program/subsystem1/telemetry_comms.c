@@ -30,9 +30,11 @@
 #define S1_USE_MQTT         (0)
 #endif
 
-/* Outbox: topic byte + the largest payload (a telemetry frame). */
-#define S1_OUTBOX_MSG_LEN   (1u + MSG_LEN_TELEMETRY)
-#define S1_OUTBOX_DEPTH     (4u)
+/* Outbox: topic byte + the largest payload (a log line; a telemetry
+   frame is 12 bytes). */
+#define S1_OUTBOX_MSG_LEN   (1u + APP_LOG_MAX)
+#define S1_OUTBOX_DEPTH     (8u)
+MSG_STATIC_ASSERT(APP_LOG_MAX >= MSG_LEN_TELEMETRY, outbox_fits_frame);
 
 /* ---------------------------------------------------------------------
  * Private state
@@ -182,7 +184,9 @@ static void update_wifi_fault(void)
 /*
  * One human-readable line: both line sensors (B = above its threshold,
  * i.e. dark, W = light), the thresholds, the steering error the car is
- * using, and the duty each wheel is actually getting.
+ * using, the duty each wheel is actually getting, and the IMU pitch
+ * (+ = nose up) and roll (side to side) in degrees, flagged if the IMU
+ * is in fault.
  */
 static void print_debug_line(void)
 {
@@ -204,15 +208,18 @@ static void print_debug_line(void)
         msg_unpack_line(word, &line);
     }
 
-    tm_printf((UB*)"[DBG] side %4d/%4d %s  ctr %4d/%4d %s  err %3d %s"
-                   "  duty L %3d R %3d\n",
+    APP_LOG((UB*)"[DBG] side %4d/%4d %s  ctr %4d/%4d %s  err %3d %s"
+                   "  duty L %3d R %3d  pitch %3d roll %3d%s\n",
               (INT)s_side.value, (INT)thr_side,
               ((uint32_t)s_side.value > thr_side) ? "B" : "W",
               (INT)s_centre.value, (INT)thr_ctr,
               ((uint32_t)s_centre.value > thr_ctr) ? "B" : "W",
               (INT)line.error,
               line.b_valid ? "ok" : "--",
-              (INT)duty_l, (INT)duty_r);
+              (INT)duty_l, (INT)duty_r,
+              (INT)s4_get_tilt_deg(), (INT)s4_get_roll_deg(),
+              (0u != ((uint32_t)fault_get() & FAULT_IMU)) ? " IMU-FAULT"
+                                                          : "");
 }
 
 /*
@@ -244,17 +251,16 @@ static void send_state_frame(void)
     frame_seq = (uint8_t)(frame_seq + 1u);
 
     len = msg_pack_telemetry(&frame, buf, (uint8_t)sizeof(buf));
-    if ((1 == S1_DEBUG_PRINT) && (0 == S1_USE_MQTT))
+    /* Readable line: console, and car18/log over Wi-Fi.  Binary frame:
+       always over Wi-Fi; on the console only if the readable line is
+       off (two lines every 200 ms would bury everything else). */
+    if (1 == S1_DEBUG_PRINT)
     {
         print_debug_line();
     }
-    else if (0u != len)
+    if ((0u != len) && ((1 == S1_USE_MQTT) || (0 == S1_DEBUG_PRINT)))
     {
         publish(S1_TOPIC_ID_STATE, buf, len);
-    }
-    else
-    {
-        /* Pack failed: nothing to send. */
     }
 }
 
@@ -349,7 +355,7 @@ EXPORT bool s1_accept_command(uint8_t seq, uint8_t command)
     }
     else
     {
-        tm_printf((UB*)"[S1] rejected command %d seq=%d\n",
+        APP_LOG((UB*)"[S1] rejected command %d seq=%d\n",
                   (INT)command, (INT)seq);
     }
 
@@ -412,6 +418,37 @@ EXPORT void s1_reset_stats(void)
     max_hold_us = 0u;
 }
 
+/*
+ * One log line (see APP_LOG in app.h): to the console, and in an MQTT
+ * build also to car18/log, without the trailing newline.  Never blocks:
+ * if the outbox is full the Wi-Fi copy is dropped.
+ */
+EXPORT void app_log_line(const UB *p_text)
+{
+#if (1 == S1_USE_MQTT)
+    uint8_t len = 0u;
+#endif
+
+    if (NULL == p_text)
+    {
+        return;
+    }
+
+    (void)tm_putstring(p_text);
+
+#if (1 == S1_USE_MQTT)
+    while ((len < APP_LOG_MAX) && ((UB)0 != p_text[len])
+           && ((UB)'\n' != p_text[len]))
+    {
+        len = (uint8_t)(len + 1u);
+    }
+    if ((0u != len) && (h_mbf_outbox > 0))
+    {
+        publish(S1_TOPIC_ID_LOG, (const uint8_t *)p_text, len);
+    }
+#endif
+}
+
 /* ---------------------------------------------------------------------
  * MQTT hooks -- run on the template's radio task (core 0).
  * --------------------------------------------------------------------- */
@@ -437,6 +474,10 @@ EXPORT int app_mqtt_next_publish(const char **pp_topic, unsigned char *p_buf,
 
             case S1_TOPIC_ID_HEARTBEAT:
                 *pp_topic = S1_TOPIC_HEARTBEAT;
+            break;
+
+            case S1_TOPIC_ID_LOG:
+                *pp_topic = S1_TOPIC_LOG;
             break;
 
             default:

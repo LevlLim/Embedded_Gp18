@@ -35,6 +35,14 @@ uint8_t adc_sampler_since(uint32_t after_us, adc_sample_t *p_out,
 }
 uint32_t app_now_ms(void) { return (0u); }
 void tm_printf(UB *fmt, ...) { (void)fmt; }
+INT tm_sprintf(UB *str, const UB *format, ...)
+{
+    (void)format;
+    str[0] = (UB)0;
+    return (0);
+}
+void app_log_line(const UB *p_text) { (void)p_text; }
+bool s4_configure_imu(bool b_verbose) { (void)b_verbose; return (false); }
 uint32_t app_wait_period(void) { return (0u); }
 void fault_set(uint16_t bits) { (void)bits; }
 bool gpio_irq_read_echo(gpio_irq_echo_t *p_out)

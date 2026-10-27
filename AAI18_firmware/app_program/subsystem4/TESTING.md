@@ -47,8 +47,12 @@ Car flat and still at power-up (the IMU calibrates on boot).
 | `PASS: IMU WHO_AM_I = 0x..` | the accelerometer answers on I²C (note the value: 0x33 for an LIS3DH / LSM303AGR-type part) |
 | `i2c errors so far = 0` | no bus errors |
 | `10 deg over 100 mm = ~17400 um`, `PASS: level chassis adds no height`, `pitch(176, 1000) = 10` | maths on the target |
-| `LIFT THE NOSE, THEN THE TAIL (6 s)` | tilt the car by hand while it prints |
-| `PASS: tilt range a..b deg` | the readings spread at least 20° |
+| `LIFT THE NOSE, THEN THE TAIL (6 s)` | tilt the car front-back by hand while it prints |
+| `PASS: pitch range a..b deg` | pitch spread at least 20° (nose up = +) |
+| `TIP THE CAR LEFT, THEN RIGHT (6 s)` | tilt it side to side |
+| `PASS: roll range a..b deg` | roll spread at least 20° |
+
+Outside the self-test, every `[DBG]` line ends with `pitch N roll N` (and `IMU-FAULT` if the IMU is not calibrated), so you can watch both angles live in the normal firmware too.
 
 Also check the boot lines `[S4] IMU WHO_AM_I = …` and no `[S4] … config writes failed`.
 
