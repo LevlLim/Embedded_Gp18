@@ -1,354 +1,327 @@
-/*
- * adc_sampler.c
+/**
+ * @file adc_sampler.c
+ * @brief Sole ADC owner: bounded GP28/GP26/GP27 periodic conversions.
  *
- * Group AAI18 -- RP2040 ADC round-robin sampler.
+ * Tribunal 1 explicitly keeps free-running timestamps as native 32-bit
+ * values. Samples therefore use 12 value bits in a uint16_t and a full
+ * uint32_t timestamp. The 32-entry ring is 256 bytes, not the former 1 KiB.
  *
- * Written against the registers directly because the template's BSP has no
- * ADC support and the Pico SDK's hardware/adc.h is not on the application
- * include path.  See drivers/rp2040_regs.h for why.
- *
- * APIs used: out_w, in_w, set_w, clr_w (template register helpers)
+ * One 32-bit publication sequence guards the ISR's multi-field records:
+ * odd while writing, even when stable. Readers copy only a stable version.
+ * All shared field accesses are atomic loads/stores. No lock, heap, DMA,
+ * cross-core interrupt masking, FIFO or unbounded hardware wait is used.
  */
-
 #include "adc_sampler.h"
 #include "../drivers/rp2040_regs.h"
 
-/* ---------------------------------------------------------------------
- * Packed sample word: value in bits 11:0, timestamp bits 19:0 in 31:12.
- * --------------------------------------------------------------------- */
-#define SAMPLE_VALUE_MASK   (0x0FFFu)
-#define SAMPLE_TIME_SHIFT   (12u)
-#define SAMPLE_TIME_MASK    (0x000FFFFFu)
+#define ADC_VALUE_MASK       (0x0FFFU)
+#define ADC_LINE_TICKS       (PERIOD_LINE_MS / ADC_POLL_PERIOD_MS)
+#define ADC_RESET_TIMEOUT    (100000U)
+#define ADC_SNAPSHOT_TRIES   (2U)
 
-/* ADC clock is 48 MHz; DIV is 8.8 fixed point, rate = 48 MHz / (1 + DIV). */
-#define ADC_CLOCK_HZ        (48000000u)
-#define ADC_DIV_INT         ((ADC_CLOCK_HZ / ADC_TOTAL_RATE_SPS) - 1u)
+_Static_assert((S3_ADC_RING_LEN > 0U)
+    && (0U == (S3_ADC_RING_LEN & (S3_ADC_RING_LEN - 1U))),
+    "ADC ring length must be a power of two");
 
-/* ---------------------------------------------------------------------
- * Private data
- * --------------------------------------------------------------------- */
+static adc_sample_t g_latest[ADC_CH_COUNT];
+static adc_sample_t g_ring[S3_ADC_RING_LEN];
+static uint32_t g_publication = 0U;
+static uint32_t g_ring_written = 0U;
+static uint32_t g_last_poll_us = 0U;
+static uint32_t g_failures = 0U;
+static uint8_t g_valid_channels = 0U;
+static uint8_t g_line_tick = 0U;
+static bool g_b_initialised = false;
+static uint16_t g_max_poll_us = 0U;
 
-/* Latest sample per channel, packed.  Single writer (the 1 ms poll);
-   a single aligned word, so a reader on any task gets one whole sample. */
-static volatile uint32_t latest[ADC_CH_COUNT];
-static volatile bool     b_have_sample[ADC_CH_COUNT];
+static void adc_sampler_poll(void * p_exinf);
 
-/* Barcode history ring.  Written by the 1 ms poll (cyclic handler), read
-   by the barcode task.  Each entry is one word and the index is advanced
-   after the entry is written, so the reader never sees a half-written
-   entry; at 512 ms of history it cannot be overwritten while read. */
-static volatile uint32_t ring[ADC_RING_LEN];
-static volatile uint32_t ring_write_index = 0u;
-
-static volatile uint32_t overrun_count = 0u;
-static volatile uint32_t sample_count  = 0u;   /* diagnostics only */
-static bool     b_initialised = false;
-static uint8_t  next_channel  = 0u;
-
-/* ---------------------------------------------------------------------
- * Private function prototypes
- * --------------------------------------------------------------------- */
-
-static void adc_sampler_poll(void *p_exinf);
-
-/* ---------------------------------------------------------------------
- * Private functions
- * --------------------------------------------------------------------- */
-
-/*
- * Put one GPIO into analogue mode: disable the digital input buffer and
- * the pulls, and the output driver.
- */
-static void adc_pin_to_analogue(uint32_t gpio)
+static void store_sample(adc_sample_t * p_target, uint16_t value,
+                         uint32_t timestamp_us)
 {
-    clr_w(PADS_GPIO(gpio), PADS_IE | PADS_PUE | PADS_PDE);
-    set_w(PADS_GPIO(gpio), PADS_OD);
+    __atomic_store_n(&p_target->value, value, __ATOMIC_RELAXED);
+    __atomic_store_n(&p_target->timestamp_us, timestamp_us, __ATOMIC_RELAXED);
 }
 
-static uint32_t pack_sample(uint32_t value, uint32_t time_us)
+static void load_sample(adc_sample_t const * p_source, adc_sample_t * p_out)
 {
-    return ((value & SAMPLE_VALUE_MASK)
-            | ((time_us & SAMPLE_TIME_MASK) << SAMPLE_TIME_SHIFT));
+    p_out->value = __atomic_load_n(&p_source->value, __ATOMIC_RELAXED);
+    p_out->timestamp_us = __atomic_load_n(&p_source->timestamp_us,
+                                         __ATOMIC_RELAXED);
 }
 
-/*
- * Rebuild a full timestamp from a packed sample, relative to 'now'.  The
- * modular difference is the sample's age, correct for any sample younger
- * than 1.05 s.
- */
-static void unpack_sample(uint32_t word, uint32_t now_us,
-                          adc_sample_t *p_out)
+uint32_t adc_sampler_now_us(void)
 {
-    uint32_t age_us;
-
-    age_us = (now_us - (word >> SAMPLE_TIME_SHIFT)) & SAMPLE_TIME_MASK;
-
-    p_out->value        = (uint16_t)(word & SAMPLE_VALUE_MASK);
-    p_out->timestamp_us = now_us - age_us;
+    return (RP2040_NOW_US());
 }
 
-/*
- * Store one FIFO entry.  The FIFO entry carries no channel tag, so the
- * channel is tracked by the rotating counter in adc_sampler_poll.
- */
-static void store_sample(uint8_t channel, uint32_t value, uint32_t time_us)
+static bool wait_ready(uint32_t address, uint32_t mask, uint32_t limit)
 {
-    uint32_t word;
+    bool b_ready = false;
+    uint32_t poll = 0U;
 
-    if (channel < ADC_CH_COUNT)
+    for (poll = 0U; poll < limit; poll++)
     {
-        word                   = pack_sample(value, time_us);
-        latest[channel]        = word;
-        b_have_sample[channel] = true;
-        sample_count           = sample_count + 1u;
+        if (0U != (in_w(address) & mask))
+        {
+            b_ready = true;
+            break;
+        }
+    }
+    return (b_ready);
+}
 
+static void sample_channel(uint8_t channel, uint8_t * p_valid)
+{
+    uint16_t value = 0U;
+    uint32_t stamp = 0U;
+    uint32_t index = g_ring_written;
+    uint32_t control = ADC_CS_EN
+                       | ((uint32_t)channel << ADC_CS_AINSEL_SHIFT);
+
+    out_w(ADC_CS, control);
+    out_w(ADC_CS, control | ADC_CS_START_ONCE);
+    if (wait_ready(ADC_CS, ADC_CS_READY, S3_ADC_TIMEOUT_POLLS)
+        && (0U == (in_w(ADC_CS) & ADC_CS_ERR)))
+    {
+        value = (uint16_t)(in_w(ADC_RESULT) & ADC_VALUE_MASK);
+        stamp = adc_sampler_now_us();
+        store_sample(&g_latest[channel], value, stamp);
+        *p_valid |= (uint8_t)(1U << channel);
         if (ADC_CH_BARCODE == channel)
         {
-            ring[ring_write_index % ADC_RING_LEN] = word;
-            ring_write_index = ring_write_index + 1u;
+            store_sample(&g_ring[index & (S3_ADC_RING_LEN - 1U)],
+                         value, stamp);
+            /* Keep a full ring full across counter wrap. S3_ADC_RING_LEN
+             * has the same masked head as zero without looking empty. */
+            __atomic_store_n(&g_ring_written,
+                (UINT32_MAX == index) ? S3_ADC_RING_LEN : index + 1U,
+                __ATOMIC_RELAXED);
         }
     }
+    else
+    {
+        *p_valid &= (uint8_t)~(1U << channel);
+        __atomic_store_n(&g_failures, g_failures + 1U, __ATOMIC_RELAXED);
+    }
 }
 
-/*
- * Throw the FIFO away after an overrun and resynchronise the rotation.
- */
-static void recover_from_overrun(void)
+/* Kernel cyclic callback: the kernel supplies the interrupt wrapper. */
+static void adc_sampler_poll(void * p_exinf)
 {
-    overrun_count = overrun_count + 1u;
-
-    /* OVER and UNDER are write-1-to-clear.  Clear them with a PLAIN write
-       that also restores the FIFO configuration (EN only).  The atomic
-       set alias (set_w) is not documented to clear W1C bits: if it does
-       not, OVER stays set, every poll lands here, and no sample is ever
-       stored -- calibration then reports "4095..0" on every channel. */
-    out_w(ADC_FCS, ADC_FCS_EN | ADC_FCS_OVER | ADC_FCS_UNDER);
-
-    while (0u == (in_w(ADC_FCS) & ADC_FCS_EMPTY))
-    {
-        (void)in_w(ADC_FIFO);
-    }
-
-    /* The next conversion the hardware completes is the one AINSEL points
-       at now. */
-    next_channel = (uint8_t)((in_w(ADC_CS) & ADC_CS_AINSEL_MASK)
-                             >> ADC_CS_AINSEL_SHIFT);
-}
-
-/* ---------------------------------------------------------------------
- * Public functions
- * --------------------------------------------------------------------- */
-
-EXPORT ER adc_sampler_init(void)
-{
-    T_CCYC   ccyc = {0};
-    ID       cycid;
-    uint32_t chan;
-
-    if (b_initialised)
-    {
-        return (E_OK);
-    }
-
-    for (chan = 0u; chan < ADC_CH_COUNT; chan++)
-    {
-        latest[chan]        = 0u;
-        b_have_sample[chan] = false;
-    }
-
-    /* Release the ADC from reset and wait for it to come up. */
-    clr_w(RESETS_RESET, RESETS_RESET_ADC);
-    while (0u == (in_w(RESETS_RESET_DONE) & RESETS_RESET_ADC))
-    {
-        /* Busy wait: this runs once, at init, before any task is started. */
-    }
-
-    adc_pin_to_analogue(PIN_IR_LINE_L);
-    adc_pin_to_analogue(PIN_IR_LINE_C);
-    adc_pin_to_analogue(PIN_IR_BARCODE);
-
-    /* Enable the ADC, no temperature sensor. */
-    out_w(ADC_CS, ADC_CS_EN);
-    while (0u == (in_w(ADC_CS) & ADC_CS_READY))
-    {
-        /* Wait for the first calibration to settle. */
-    }
-
-    /* 1.5 kS/s in total -- see the header for why it must be this slow
-       while the FIFO is drained by polling. */
-    out_w(ADC_DIV, (ADC_DIV_INT << 8u));
-
-    /* FIFO: enabled, no DMA request, full 12-bit results (no shift). */
-    out_w(ADC_FCS, ADC_FCS_EN);
-
-    ring_write_index = 0u;
-    overrun_count    = 0u;
-    next_channel     = 0u;
-
-    /* Round-robin across ADC0..ADC2 starting at ADC0, free-running. */
-    out_w(ADC_CS, ADC_CS_EN
-                | (0u << ADC_CS_AINSEL_SHIFT)
-                | (0x07u << ADC_CS_RROBIN_SHIFT)
-                | ADC_CS_START_MANY);
-
-    b_initialised = true;
-
-    /* Drain the FIFO every 1 ms from a cyclic handler (see poll). */
-    ccyc.cycatr = TA_HLNG | TA_STA;
-    ccyc.cychdr = (FP)adc_sampler_poll;
-    ccyc.cyctim = (RELTIM)ADC_POLL_PERIOD_MS;
-    ccyc.cycphs = (RELTIM)ADC_POLL_PERIOD_MS;
-    cycid       = tk_cre_cyc(&ccyc);
-
-    return ((cycid < E_OK) ? (ER)cycid : E_OK);
-}
-
-/*
- * Drain the FIFO.  Runs every 1 ms from a cyclic handler (timer interrupt
- * context), so no task -- including the template's higher-priority USB and
- * Wi-Fi service tasks -- can delay it long enough for the 4-entry FIFO to
- * overflow.  It makes no kernel call.
- */
-static void adc_sampler_poll(void *p_exinf)
-{
-    uint32_t entries[4];
-    uint32_t now_us;
-    uint32_t level;
-    uint32_t idx;
+    uint32_t now_us = adc_sampler_now_us();
+    uint32_t sequence = g_publication;
+    uint8_t valid = __atomic_load_n(&g_valid_channels, __ATOMIC_RELAXED);
+    uint32_t elapsed_us = 0U;
 
     (void)p_exinf;
-
-    if (b_initialised)
+    if (g_b_initialised)
     {
-        if (0u != (in_w(ADC_FCS) & ADC_FCS_OVER))
+        __atomic_store_n(&g_publication, sequence + 1U, __ATOMIC_SEQ_CST);
+        if ((now_us - g_last_poll_us) > S3_SAMPLE_STALE_US)
         {
-            recover_from_overrun();
+            valid = 0U;
+            __atomic_store_n(&g_ring_written, 0U, __ATOMIC_RELAXED);
         }
-        else
+        sample_channel(ADC_CH_BARCODE, &valid);
+        if (0U == g_line_tick)
         {
-            /* Read everything first, then stamp: the newest entry was
-               converted "now", each older one one sample gap earlier. */
-            now_us = RP2040_NOW_US();
-            level  = 0u;
-
-            while ((0u == (in_w(ADC_FCS) & ADC_FCS_EMPTY)) && (level < 4u))
-            {
-                entries[level] = in_w(ADC_FIFO);
-                level          = level + 1u;
-            }
-
-            for (idx = 0u; idx < level; idx++)
-            {
-                if (0u == (entries[idx] & ADC_FIFO_ERR))
-                {
-                    store_sample(next_channel,
-                                 entries[idx] & ADC_FIFO_VAL_MASK,
-                                 now_us - ((level - 1u - idx)
-                                           * ADC_SAMPLE_GAP_US));
-                }
-
-                next_channel = (uint8_t)((next_channel + 1u) % ADC_CH_COUNT);
-            }
+            sample_channel(ADC_CH_LINE_L, &valid);
+            sample_channel(ADC_CH_LINE_R, &valid);
+        }
+        g_line_tick++;
+        if (g_line_tick >= ADC_LINE_TICKS)
+        {
+            g_line_tick = 0U;
+        }
+        __atomic_store_n(&g_valid_channels, valid, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_last_poll_us, now_us, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_publication, sequence + 2U, __ATOMIC_RELEASE);
+        elapsed_us = adc_sampler_now_us() - now_us;
+        if (elapsed_us > g_max_poll_us)
+        {
+            __atomic_store_n(&g_max_poll_us,
+                (uint16_t)((elapsed_us > 65535U) ? 65535U : elapsed_us),
+                __ATOMIC_RELAXED);
         }
     }
 }
 
-EXPORT bool adc_sampler_read(uint8_t channel, adc_sample_t *p_out)
+ER adc_sampler_init(void)
 {
-    bool b_ok = false;
+    T_CCYC cycle = {0};
+    ID h_cycle = (ID)0;
+    uint32_t channel = 0U;
+    uint32_t pin = 0U;
+    ER error = E_OK;
 
-    if ((channel < ADC_CH_COUNT) && (NULL != p_out) && b_have_sample[channel])
+    if (!g_b_initialised)
     {
-        /* One word, one sample: no tearing possible. */
-        unpack_sample(latest[channel], RP2040_NOW_US(), p_out);
-        b_ok = true;
+        clr_w(RESETS_RESET, RESETS_RESET_ADC);
+        if (!wait_ready(RESETS_RESET_DONE, RESETS_RESET_ADC,
+                        ADC_RESET_TIMEOUT))
+        {
+            error = E_IO;
+        }
+        if (E_OK == error)
+        {
+            for (channel = 0U; channel < ADC_CH_COUNT; channel++)
+            {
+                pin = PIN_IR_LINE_L + channel;
+                clr_w(PADS_GPIO(pin), PADS_IE | PADS_PUE | PADS_PDE);
+                set_w(PADS_GPIO(pin), PADS_OD);
+                store_sample(&g_latest[channel], 0U, 0U);
+            }
+            out_w(ADC_FCS, 0U);
+            out_w(ADC_DIV, 0U);
+            out_w(ADC_CS, ADC_CS_EN);
+            if (!wait_ready(ADC_CS, ADC_CS_READY, S3_ADC_TIMEOUT_POLLS))
+            {
+                error = E_IO;
+            }
+        }
+        if (E_OK == error)
+        {
+            g_valid_channels = 0U;
+            g_ring_written = 0U;
+            g_failures = 0U;
+            g_line_tick = 0U;
+            g_last_poll_us = adc_sampler_now_us();
+            cycle.cycatr = TA_HLNG | TA_STA;
+            cycle.cychdr = (FP)adc_sampler_poll;
+            cycle.cyctim = (RELTIM)ADC_POLL_PERIOD_MS;
+            cycle.cycphs = (RELTIM)ADC_POLL_PERIOD_MS;
+            h_cycle = tk_cre_cyc(&cycle);
+            error = (h_cycle > (ID)0) ? E_OK : E_OBJ;
+            /* A failed cycle creation remains retryable. */
+            g_b_initialised = (E_OK == error);
+        }
     }
-
-    return (b_ok);
+    return (error);
 }
 
-/*
- * True if a sample stamped sample_us is strictly newer than after_us: a
- * small positive unsigned difference, correct across the timer wrap.
- */
-static bool is_newer(uint32_t sample_us, uint32_t after_us)
+static bool snapshot_complete(uint32_t sequence)
 {
-    uint32_t diff = sample_us - after_us;
-
-    return ((0u != diff) && (diff <= 0x7FFFFFFFu));
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    return (sequence
+        == __atomic_load_n(&g_publication, __ATOMIC_RELAXED));
 }
 
-EXPORT uint8_t adc_sampler_since(uint32_t after_us, adc_sample_t *p_out,
-                                 uint8_t max_out)
+bool adc_sampler_read(uint8_t channel, adc_sample_t * p_out)
 {
-    adc_sample_t sample;
-    uint32_t     now_us;
-    uint32_t     first;
-    uint32_t     oldest;
-    uint32_t     newest;
-    uint32_t     scan;
-    uint8_t      count = 0u;
+    adc_sample_t sample = {0U, 0U};
+    uint32_t sequence = 0U;
+    uint32_t poll_us = 0U;
+    uint32_t now_us = 0U;
+    uint8_t flags = 0U;
+    uint8_t attempt = 0U;
+    bool b_valid = false;
 
-    if ((NULL != p_out) && (0u != max_out))
+    if ((channel < ADC_CH_COUNT) && (NULL != p_out) && g_b_initialised)
     {
-        /* One snapshot of the index: the poll may advance it meanwhile. */
-        newest = ring_write_index;
-        now_us = RP2040_NOW_US();
-        oldest = (newest > ADC_RING_LEN) ? (newest - ADC_RING_LEN) : 0u;
+        for (attempt = 0U; attempt < ADC_SNAPSHOT_TRIES; attempt++)
+        {
+            sequence = __atomic_load_n(&g_publication, __ATOMIC_ACQUIRE);
+            if (0U != (sequence & 1U))
+            {
+                continue;
+            }
+            load_sample(&g_latest[channel], &sample);
+            poll_us = __atomic_load_n(&g_last_poll_us, __ATOMIC_RELAXED);
+            flags = __atomic_load_n(&g_valid_channels, __ATOMIC_RELAXED);
+            if (snapshot_complete(sequence))
+            {
+                now_us = adc_sampler_now_us();
+                b_valid = (0U != (flags & (uint8_t)(1U << channel)))
+                    && ((now_us - poll_us) <= S3_SAMPLE_STALE_US)
+                    && ((now_us - sample.timestamp_us)
+                        <= S3_SAMPLE_STALE_US);
+                break;
+            }
+        }
+    }
+    if (b_valid)
+    {
+        *p_out = sample;
+    }
+    return (b_valid);
+}
 
-        /* Walk BACK from the newest entry to the first one that is new.
-           Normally that is one or two steps, so the 1 ms tick does not
-           pay for a scan of the whole ring. */
+uint8_t adc_sampler_since(uint32_t after_us, adc_sample_t * p_out,
+                         uint8_t capacity)
+{
+    uint32_t sequence = __atomic_load_n(&g_publication, __ATOMIC_ACQUIRE);
+    uint32_t newest = 0U;
+    uint32_t first = 0U;
+    uint32_t scan = 0U;
+    uint32_t available = 0U;
+    uint32_t difference = 0U;
+    uint32_t poll_us = 0U;
+    adc_sample_t sample = {0U, 0U};
+    uint8_t count = 0U;
+
+    if ((NULL != p_out) && (0U != capacity) && g_b_initialised
+        && (0U == (sequence & 1U)))
+    {
+        newest = __atomic_load_n(&g_ring_written, __ATOMIC_RELAXED);
+        poll_us = __atomic_load_n(&g_last_poll_us, __ATOMIC_RELAXED);
+        available = (newest < S3_ADC_RING_LEN) ? newest : S3_ADC_RING_LEN;
         first = newest;
-        while (first > oldest)
+        /* At most 32 comparisons; normally only one or two. */
+        for (scan = 0U; scan < available; scan++)
         {
-            unpack_sample(ring[(first - 1u) % ADC_RING_LEN], now_us, &sample);
-            if (!is_newer(sample.timestamp_us, after_us))
+            load_sample(&g_ring[(first - 1U) & (S3_ADC_RING_LEN - 1U)],
+                        &sample);
+            difference = sample.timestamp_us - after_us;
+            if ((0U == difference) || (difference > 0x7FFFFFFFU))
             {
                 break;
             }
-            first = first - 1u;
+            first--;
         }
-
-        /* Copy forward, oldest first. */
-        for (scan = first; (scan < newest) && (count < max_out);
-             scan++)
+        for (scan = first; (scan != newest) && (count < capacity); scan++)
         {
-            unpack_sample(ring[scan % ADC_RING_LEN], now_us, &p_out[count]);
-            count = (uint8_t)(count + 1u);
+            load_sample(&g_ring[scan & (S3_ADC_RING_LEN - 1U)],
+                        &p_out[count]);
+            count++;
+        }
+        if (!snapshot_complete(sequence)
+            || ((adc_sampler_now_us() - poll_us) > S3_SAMPLE_STALE_US))
+        {
+            count = 0U;
         }
     }
-
     return (count);
 }
 
-EXPORT uint32_t adc_sampler_overruns(void)
+uint32_t adc_sampler_overruns(void)
 {
-    return (overrun_count);
+    return (__atomic_load_n(&g_failures, __ATOMIC_RELAXED));
 }
 
-EXPORT void adc_sampler_selftest(void)
+uint16_t adc_sampler_max_us(void)
 {
-    adc_sample_t sample;
-    uint8_t      chan;
+    return (__atomic_load_n(&g_max_poll_us, __ATOMIC_RELAXED));
+}
 
-    tm_printf((UB*)"[ADC] CS=%08x FCS=%08x DIV=%08x\n",
-              in_w(ADC_CS), in_w(ADC_FCS), in_w(ADC_DIV));
-    tm_printf((UB*)"[ADC] samples=%d overruns=%d\n", (INT)sample_count,
-              (INT)overrun_count);
+void adc_sampler_selftest(void)
+{
+    adc_sample_t sample = {0U, 0U};
+    uint8_t channel = 0U;
 
-    for (chan = 0u; chan < ADC_CH_COUNT; chan++)
+    APP_LOG((UB *)"[ADC] conversion failures=%d, max handler=%d us\n",
+              (INT)adc_sampler_overruns(), (INT)adc_sampler_max_us());
+    for (channel = 0U; channel < ADC_CH_COUNT; channel++)
     {
-        if (adc_sampler_read(chan, &sample))
+        if (adc_sampler_read(channel, &sample))
         {
-            tm_printf((UB*)"[ADC] ch%d = %d (t=%d us)\n",
-                      (INT)chan, (INT)sample.value, (INT)sample.timestamp_us);
+            APP_LOG((UB *)"[ADC] ch%d=%d, age=%d us\n", (INT)channel,
+                      (INT)sample.value,
+                      (INT)(adc_sampler_now_us() - sample.timestamp_us));
         }
         else
         {
-            tm_printf((UB*)"[ADC] ch%d = no sample yet\n", (INT)chan);
+            APP_LOG((UB *)"[ADC] ch%d unavailable/stale\n", (INT)channel);
         }
     }
 }
-
-/* end of file */

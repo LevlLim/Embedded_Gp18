@@ -34,6 +34,7 @@ uint8_t adc_sampler_since(uint32_t after_us, adc_sample_t *p_out,
     return (0u);
 }
 uint32_t app_now_ms(void) { return (0u); }
+uint32_t adc_sampler_now_us(void) { return (0u); }
 void tm_printf(UB *fmt, ...) { (void)fmt; }
 INT tm_sprintf(UB *str, const UB *format, ...)
 {

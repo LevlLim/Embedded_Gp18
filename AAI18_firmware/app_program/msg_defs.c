@@ -368,7 +368,7 @@ bool msg_unpack_obstacle(const uint8_t *p_buf, uint8_t buf_len,
 }
 
 /* ---------------------------------------------------------------------
- * Public: telemetry frame, 12 bytes, schema v2.
+ * Public: telemetry frame, 13 bytes, schema v3.
  *
  *   byte 0       schema version
  *   byte 1       frame sequence
@@ -380,6 +380,7 @@ bool msg_unpack_obstacle(const uint8_t *p_buf, uint8_t buf_len,
  *   byte 7       obstacle distance (8)
  *   bytes 8..9   fault mask (10) | wifi_state (3) | last barcode (3)
  *   bytes 10..11 encoder delta (16)
+ *   byte 12      letter (5, A=1..Z=26, none=0) | reserved (3)
  *
  * Every field is saturated before it is masked, so an out-of-range input
  * can never wrap into a plausible wrong value (rule R5).
@@ -435,6 +436,20 @@ uint8_t msg_pack_telemetry(const msg_telemetry_t *p_tel,
         p_buf[10] = (uint8_t)((uint32_t)p_tel->encoder_delta & 0xFFu);
         p_buf[11] = (uint8_t)(((uint32_t)p_tel->encoder_delta >> 8u) & 0xFFu);
 
+        p_buf[12] = 0U;
+        if (((uint8_t)'A' <= p_tel->last_letter)
+            && (p_tel->last_letter <= (uint8_t)'Z'))
+        {
+            p_buf[12] = (uint8_t)(p_tel->last_letter - (uint8_t)'A' + 1U);
+        }
+        else if (0U != p_tel->last_letter)
+        {
+            note_saturation(NULL);
+        }
+        else
+        {
+            /* No valid barcode yet. */
+        }
         written = MSG_LEN_TELEMETRY;
     }
 
@@ -460,7 +475,8 @@ bool msg_unpack_telemetry(const uint8_t *p_buf, uint8_t buf_len,
 
         b_ok = ((line_state <= (uint32_t)MSG_LINE_STATE_LAST)
                 && (wifi_state <= MSG_WIFI_STATE_LAST)
-                && is_barcode_code(barcode));
+                && is_barcode_code(barcode)
+                && (p_buf[12] <= 26U));
     }
 
     if (b_ok)
@@ -484,6 +500,8 @@ bool msg_unpack_telemetry(const uint8_t *p_buf, uint8_t buf_len,
         p_tel->fault_mask     = (uint16_t)(word & 0x03FFu);
         p_tel->wifi_state     = (uint8_t)wifi_state;
         p_tel->last_barcode   = (uint8_t)barcode;
+        p_tel->last_letter = (0U == p_buf[12]) ? 0U
+            : (uint8_t)((uint8_t)'A' + p_buf[12] - 1U);
         p_tel->encoder_delta  = (uint16_t)((uint32_t)p_buf[10]
                                            | ((uint32_t)p_buf[11] << 8u));
     }

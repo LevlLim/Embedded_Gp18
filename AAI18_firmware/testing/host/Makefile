@@ -19,7 +19,7 @@ CFLAGS  := -std=c11 -Wall -Wextra -Wconversion -Wsign-conversion \
 APP     := ../../app_program
 SRCS    := test_host.c host_stubs.c $(APP)/msg_defs.c \
            $(APP)/subsystem2/motor_control.c \
-           $(APP)/subsystem3/barcode_decoder.c \
+           $(APP)/subsystem3/barcode_decoder.c $(APP)/subsystem3/barcode_mapping.c \
            $(APP)/subsystem4/imu_terrain.c \
            $(APP)/subsystem5/obstacle_scan.c
 TARGET  := test_host

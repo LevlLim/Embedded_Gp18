@@ -46,8 +46,9 @@
  *   v1  initial layout
  *   v2  REVERSE command; hump_invalid and last barcode in the telemetry
  *       frame; saturation on every telemetry field
+ *   v3  append a 5-bit retained barcode letter (A=1..Z=26, none=0)
  * --------------------------------------------------------------------- */
-#define MSG_SCHEMA_VERSION      (2u)
+#define MSG_SCHEMA_VERSION      (3u)
 
 /* ---------------------------------------------------------------------
  * Compile-time range check (rule R7).  Fails the build if a declared
@@ -117,7 +118,7 @@ MSG_STATIC_ASSERT((MSG_BITS_LINE_ERROR + 1u + MSG_BITS_LINE_TIME) <= 32u,
 #define MSG_LEN_MOTION_CMD      (2u)
 #define MSG_LEN_BARCODE         (1u)
 #define MSG_LEN_OBSTACLE        (5u)
-#define MSG_LEN_TELEMETRY       (12u)
+#define MSG_LEN_TELEMETRY       (13u)
 #define MSG_LEN_COMMAND         (2u)   /* inbound MQTT: seq, command      */
 
 /* ---------------------------------------------------------------------
@@ -212,6 +213,7 @@ typedef struct
     uint8_t  wifi_state;
     uint8_t  last_barcode;     /* msg_barcode_cmd_t of the last decode */
     uint16_t encoder_delta;
+    uint8_t  last_letter;      /* ASCII A..Z, 0 = no valid decode */
 } msg_telemetry_t;
 
 /* Line reading, unpacked form of the single-word record. */

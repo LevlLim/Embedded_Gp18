@@ -1,530 +1,444 @@
-/*
- * line_sensor.c
+/**
+ * @file line_sensor.c
+ * @brief Line-edge hugging and transactional calibration of all IR inputs.
  *
- * Subsystem 3 -- the 5 ms line-following task and calibration.
- *
- * Reads the samples published by subsystem3/adc_sampler.  Never touches an
- * ADC register, which is what keeps the shared-ADC conflict from
- * reappearing (Design Review V2 section 9).
- *
- * LINE READING = ONE WORD (CR1 items 2 and 6)
- * -------------------------------------------
- * The reading Motion Control steers on is error (7 bits), valid (1 bit)
- * and a 24-bit millisecond timestamp, packed into one 32-bit word.  The
- * old three-field struct (12 bytes) was written under DI(), which does
- * not protect a reader on the other core; one aligned word cannot tear
- * on either core, so no lock is needed at all.
- *
- * SINGLE WRITER: every variable below is written by line_task alone,
- * except b_active / b_calibrating (written by the Controller, read here)
- * and the thresholds (written by s3_calibrate in the Controller's INIT,
- * before line following can start; each is one 16-bit store).
+ * Controller is the sole writer of g_control and calibration. Line task is
+ * the sole writer of the packed line/status records. Each public shared
+ * record is published with release/acquire loads/stores, never cross-core
+ * interrupt masking. Motor decisions remain with Buddies 2 and 5.
  */
-
-#include "subsystem3.h"
+#include "line_sensor.h"
+#include "barcode_decoder.h"
 #include "adc_sampler.h"
+#include "buddy3_config.h"
 #include "../subsystem5/subsystem5.h"
 
-/* ---------------------------------------------------------------------
- * Private state
- * --------------------------------------------------------------------- */
+#define CONTROL_ACTIVE      (0x01U)
+#define CONTROL_CALIBRATED  (0x02U)
+#define CONTROL_CALIBRATING (0x04U)
+#define CONTROL_EPOCH_STEP  (0x10U)
+#define CONTROL_EPOCH_MASK  (0xF0U)
+#define STATUS_STATE_MASK   (0x07U)
+#define STATUS_PUBLISHED    (0x08U)
+#define LEFT_DARK_FLAG      (0x10U)
+#define RIGHT_DARK_FLAG     (0x20U)
+#define SENSOR_FLAGS_MASK   (0x07U)
+#define SENSOR_VALID_FLAG   (0x08U)
+#define SENSOR_STAMP_SHIFT  (4U)
+#define SENSOR_STAMP_MASK   (0x0FFFFFFFU)
+#define CAL_THRESHOLD_MASK  (0x0FFFU)
+#define CAL_BAND_SHIFT      (12U)
+#define US_PER_MS           (1000U)
 
-static volatile uint32_t         published_word = 0u;
-static volatile bool             b_published    = false;
-static volatile msg_line_state_t line_state     = MSG_LINE_IDLE;
+static uint8_t volatile g_control = 0U;
+static uint8_t volatile g_status = (uint8_t)MSG_LINE_IDLE;
+static uint32_t volatile g_line_word = 0U;
+static uint32_t volatile g_left_cal = S3_ADC_MAX / 2U;
+static uint32_t volatile g_right_cal = S3_ADC_MAX / 2U;
+/* One atomic record: three sensor flags, valid bit, 28-bit ms timestamp. */
+static uint32_t volatile g_sensor_word = 0U;
+static int8_t g_last_error = 0;
+static uint8_t g_junction_count = 0U;
+static uint32_t g_junction_sample_us = 0U;
+static uint8_t g_line_epoch = 0U;
+static uint16_t g_max_line_us = 0U;
 
-static volatile bool b_active      = false;   /* written by Controller */
-static volatile bool b_calibrating = false;   /* written by Controller */
-
-/* Per-channel thresholds: the midpoint between black and white. */
-static volatile uint16_t threshold_left   = (uint16_t)(S3_ADC_MAX / 2u);
-static volatile uint16_t threshold_centre = (uint16_t)(S3_ADC_MAX / 2u);
-static volatile uint16_t band_left        = (uint16_t)S3_HYSTERESIS;
-static volatile uint16_t band_centre      = (uint16_t)S3_HYSTERESIS;
-static volatile uint16_t black_centre     = 0u;   /* 0 = unknown */
-
-/* line_task private. */
-static bool    b_was_active  = false;
-static bool    b_left_dark   = false;
-static bool    b_centre_dark = false;
-static int8_t  last_error    = 0;
-static uint8_t lost_count    = 0u;
-
-/* ---------------------------------------------------------------------
- * Private functions
- * --------------------------------------------------------------------- */
-
-/*
- * Schmitt-trigger comparison.  The IR sensors return a HIGHER value over
- * black.  A channel turns "dark" above threshold + half the band and
- * "light" only below threshold - half the band, so noise around the
- * threshold cannot flicker the reading.
- */
-static bool is_dark(uint16_t value, uint16_t threshold, uint16_t band,
-                    bool b_was_dark)
+typedef struct
 {
-    uint32_t half  = (uint32_t)band / 2u;
-    uint32_t upper = (uint32_t)threshold + half;
-    uint32_t lower = ((uint32_t)threshold > half)
-                   ? ((uint32_t)threshold - half) : 0u;
-    bool     b_dark = b_was_dark;
+    uint16_t minimum;
+    uint16_t maximum;
+    uint32_t last_sample_us;
+    uint8_t samples;
+} cal_stats_t;
 
-    if ((uint32_t)value > upper)
+static bool is_dark(uint16_t value, uint32_t calibration, bool b_was_dark)
+{
+    uint32_t threshold = calibration & CAL_THRESHOLD_MASK;
+    uint32_t half = ((calibration >> CAL_BAND_SHIFT) & 0xFFU) / 2U;
+    bool b_dark = b_was_dark;
+
+    if ((uint32_t)value > (threshold + half))
     {
         b_dark = true;
     }
-    else if ((uint32_t)value < lower)
+    else if (((uint32_t)value + half) < threshold)
     {
         b_dark = false;
     }
     else
     {
-        /* Inside the band: keep the previous reading. */
+        /* State is retained within the calibrated hysteresis band. */
     }
-
     return (b_dark);
 }
 
-/*
- * Steering error from the two line sensors.  Negative = the line is to
- * the car's LEFT (steer left), positive = to its right.  S3_SIDE_SIGN is
- * +1 when the side sensor is right of centre, -1 when left.  With only
- * two sensors the error is coarse (a Week 6 review risk that remains):
- *   centre only     ->   0 .. +-40 toward the blind side, from how far
- *                      the centre reading has fallen from full black
- *   centre + side   -> +-20 toward the side  slightly off
- *   side only       -> +-50 toward the side  well off
- *   neither         -> +-63 keep turning the way we last were; from
- *                      centred, AWAY from the side sensor, since the line
- *                      must have left on the side that has no sensor.
- *
- * (b_left_dark is the GP26 channel, wherever it is mounted.)
- */
-/*
- * Edge error for "centre on the line, side sensor white": 0 while the
- * centre reads full black, rising to S3_EDGE_MAX_ERROR as it falls to its
- * threshold, signed toward the blind side.
- */
-static int8_t edge_error(uint16_t centre_value)
+static void publish_reading(int8_t error, bool b_valid, uint32_t age_us,
+                            msg_line_state_t state, uint8_t sensors)
 {
-    int32_t span  = (int32_t)black_centre - (int32_t)threshold_centre;
-    int32_t short_by = (int32_t)black_centre - (int32_t)centre_value;
-    int32_t magnitude = 0;
+    uint32_t age_ms = (age_us + US_PER_MS - 1U) / US_PER_MS;
+    uint32_t stamp_ms = app_now_ms() - age_ms;
+    uint32_t word = msg_pack_line(error, b_valid, stamp_ms);
+    uint8_t status = (uint8_t)((uint8_t)state | STATUS_PUBLISHED
+                              | (sensors << SENSOR_STAMP_SHIFT));
+    uint32_t observation = 0U;
 
-    if ((span > 0) && (short_by > 0))
+    if (b_valid)
     {
-        magnitude = (short_by * S3_EDGE_MAX_ERROR) / span;
-        if (magnitude > S3_EDGE_MAX_ERROR)
-        {
-            magnitude = S3_EDGE_MAX_ERROR;
-        }
+        observation = ((stamp_ms & SENSOR_STAMP_MASK) << SENSOR_STAMP_SHIFT)
+                      | SENSOR_VALID_FLAG | sensors;
     }
 
-    /* Blind side is opposite the side sensor. */
-    return ((int8_t)(-magnitude * S3_SIDE_SIGN));
+    __atomic_store_n(&g_line_word, word, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_status, status, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_sensor_word, observation, __ATOMIC_RELEASE);
 }
 
-static int8_t compute_error(uint16_t centre_value, bool *pb_any_line)
+static int8_t compute_error(bool b_left_dark, bool b_right_dark)
 {
-    int8_t error;
+    int8_t error = 0;
 
-    *pb_any_line = true;
-
-    if (b_centre_dark && b_left_dark)
+    if (b_left_dark && !b_right_dark)
     {
-        error = (int8_t)(20 * S3_SIDE_SIGN);
+        error = (int8_t)-S3_LINE_CORRECTION;
     }
-    else if (b_centre_dark)
+    else if (b_right_dark && !b_left_dark)
     {
-        error = edge_error(centre_value);
-    }
-    else if (b_left_dark)
-    {
-        error = (int8_t)(50 * S3_SIDE_SIGN);
+        error = (int8_t)S3_LINE_CORRECTION;
     }
     else
     {
-        if (0 == last_error)
-        {
-            error = (int8_t)(-MSG_LIM_LINE_ERROR * S3_SIDE_SIGN);
-        }
-        else
-        {
-            error = (last_error < 0) ? (int8_t)-MSG_LIM_LINE_ERROR
-                                     : (int8_t)MSG_LIM_LINE_ERROR;
-        }
-        *pb_any_line = false;
+        /* Both white is aligned; both black has no steering preference. */
     }
-
-    if (*pb_any_line)
+    if (b_left_dark != b_right_dark)
     {
-        last_error = error;
+        g_last_error = error;
     }
-
     return (error);
 }
 
-/* Publish one reading as one word: a single store, never torn. */
-static void publish_reading(int8_t error, bool b_valid)
+static void mark_lost(int8_t error)
 {
-    published_word = msg_pack_line((int32_t)error, b_valid, app_now_ms());
-    b_published    = true;
+    g_junction_count = 0U;
+    if (MSG_LINE_LOST != s3_get_line_state())
+    {
+        s5_post_event(S5_EVT_LINE_LOST);
+    }
+    publish_reading(error, false, 0U, MSG_LINE_LOST, 0U);
 }
 
-/*
- * One active cycle: read both channels, classify, publish.
- */
 static void track_once(void)
 {
-    adc_sample_t s_left;
-    adc_sample_t s_centre;
-    int8_t       error;
-    bool         b_any_line;
+    adc_sample_t left = {0U, 0U};
+    adc_sample_t right = {0U, 0U};
+    uint32_t now_us = adc_sampler_now_us();
+    uint32_t left_age = 0U;
+    uint32_t right_age = 0U;
+    uint32_t age_us = 0U;
+    uint8_t status = __atomic_load_n(&g_status, __ATOMIC_ACQUIRE);
+    uint8_t sensors = 0U;
+    bool b_left_dark = false;
+    bool b_right_dark = false;
+    bool b_fresh = adc_sampler_read(ADC_CH_LINE_L, &left)
+                   && adc_sampler_read(ADC_CH_LINE_R, &right);
+    int8_t error = 0;
 
-    if (adc_sampler_read(ADC_CH_LINE_L, &s_left)
-        && adc_sampler_read(ADC_CH_LINE_C, &s_centre))
+    if (b_fresh)
     {
-        /* A full-scale reading means nothing is under the sensor (the
-           car is lifted): never the line. */
-        b_left_dark   = (s_left.value < S3_AIR_LEVEL)
-                      && is_dark(s_left.value, threshold_left, band_left,
-                                 b_left_dark);
-        b_centre_dark = (s_centre.value < S3_AIR_LEVEL)
-                      && is_dark(s_centre.value, threshold_centre,
-                                 band_centre, b_centre_dark);
-        error         = compute_error(s_centre.value, &b_any_line);
+        /* Compute age after the reads: a conversion can occur during them. */
+        now_us = adc_sampler_now_us();
+        left_age = now_us - left.timestamp_us;
+        right_age = now_us - right.timestamp_us;
+        age_us = (left_age > right_age) ? left_age : right_age;
+        b_fresh = (age_us <= S3_SAMPLE_STALE_US)
+            && (left.value < S3_AIR_LEVEL) && (right.value < S3_AIR_LEVEL);
+    }
+    if (b_fresh)
+    {
+        b_left_dark = is_dark(left.value,
+            __atomic_load_n(&g_left_cal, __ATOMIC_ACQUIRE),
+            (0U != (status & LEFT_DARK_FLAG)));
+        b_right_dark = is_dark(right.value,
+            __atomic_load_n(&g_right_cal, __ATOMIC_ACQUIRE),
+            (0U != (status & RIGHT_DARK_FLAG)));
+        sensors = (uint8_t)((b_left_dark ? S3_LINE_LEFT_BLACK : 0U)
+                     | (b_right_dark ? S3_LINE_RIGHT_BLACK : 0U));
+        error = compute_error(b_left_dark, b_right_dark);
+        if (b_left_dark && b_right_dark)
+        {
+            uint32_t sample_us = now_us - age_us;
 
-        if (b_any_line)
-        {
-            lost_count = 0u;
-            line_state = MSG_LINE_TRACK;
-            publish_reading(error, true);
-        }
-        else if (lost_count < S3_LOST_DEBOUNCE)
-        {
-            /* Within the debounce window: keep steering, still valid. */
-            lost_count = (uint8_t)(lost_count + 1u);
-            publish_reading(error, true);
+            /* Count distinct ADC pairs, not repeated task reads of one pair. */
+            if ((0U == g_junction_count)
+                || (sample_us != g_junction_sample_us))
+            {
+                g_junction_sample_us = sample_us;
+                if (g_junction_count < S3_JUNCTION_CONFIRM_SAMPLES)
+                {
+                    g_junction_count++;
+                }
+            }
+            if (g_junction_count >= S3_JUNCTION_CONFIRM_SAMPLES)
+            {
+                sensors |= S3_LINE_JUNCTION;
+            }
         }
         else
         {
-            /* Confirmed loss.  Publish invalid so Motion Control slows,
-               and tell the Controller, which decides what to do. */
-            if (MSG_LINE_LOST != line_state)
+            g_junction_count = 0U;
+        }
+        /* White/white must never start a line-lost search in this layout.
+         * TRACK now means usable edge-following input, not proof of a line
+         * beneath the car. Junction flags are a separate Buddy 3 interface. */
+        publish_reading(error, true, age_us, MSG_LINE_TRACK, sensors);
+    }
+    else
+    {
+        /* Data unavailable is not TRACK, even if the last reading was. */
+        mark_lost(g_last_error);
+    }
+}
+
+static bool calibration_word(cal_stats_t const * p_stats,
+                             uint32_t * p_calibration)
+{
+    uint32_t contrast = 0U;
+    uint32_t band = 0U;
+    uint32_t threshold = 0U;
+    bool b_valid = (p_stats->samples >= S3_CAL_MIN_SAMPLES)
+                   && (p_stats->maximum > p_stats->minimum)
+                   && (p_stats->maximum <= S3_ADC_MAX);
+
+    if (b_valid)
+    {
+        contrast = (uint32_t)p_stats->maximum - p_stats->minimum;
+        b_valid = (contrast >= S3_MIN_CONTRAST);
+    }
+    if (b_valid)
+    {
+        threshold = ((uint32_t)p_stats->minimum + p_stats->maximum) / 2U;
+        band = contrast / 4U;
+        if (band > S3_HYSTERESIS)
+        {
+            band = S3_HYSTERESIS;
+        }
+        else if (band < S3_MIN_BAND)
+        {
+            band = S3_MIN_BAND;
+        }
+        else
+        {
+            /* Use the measured band. */
+        }
+        b_valid = (threshold > (band / 2U))
+                  && ((threshold + band / 2U) < S3_ADC_MAX);
+        if (b_valid)
+        {
+            *p_calibration = threshold | (band << CAL_BAND_SHIFT);
+        }
+    }
+    return (b_valid);
+}
+
+ER s3_calibrate(void)
+{
+    cal_stats_t statistics[ADC_CH_COUNT] = {{0U}};
+    uint32_t candidates[ADC_CH_COUNT] = {0U};
+    adc_sample_t sample = {0U, 0U};
+    uint32_t now_us = 0U;
+    uint32_t count = 0U;
+    uint8_t channel = 0U;
+    bool b_valid = true;
+    uint8_t control = __atomic_load_n(&g_control, __ATOMIC_ACQUIRE);
+
+    control = (uint8_t)((control & (uint8_t)~CONTROL_CALIBRATED)
+                        | CONTROL_CALIBRATING);
+    control = (uint8_t)(control + CONTROL_EPOCH_STEP);
+    __atomic_store_n(&g_control, control, __ATOMIC_RELEASE);
+    s3_barcode_reset();
+    for (channel = 0U; channel < ADC_CH_COUNT; channel++)
+    {
+        statistics[channel].minimum = (uint16_t)S3_ADC_MAX;
+    }
+    APP_LOG((UB *)"[S3] 3 s calibration: sweep EACH IR sensor across "
+                   "black and white\n");
+    for (count = 0U; count < S3_CAL_SAMPLES; count++)
+    {
+        for (channel = 0U; channel < ADC_CH_COUNT; channel++)
+        {
+            if (adc_sampler_read(channel, &sample))
             {
-                s5_post_event(S5_EVT_LINE_LOST);
+                now_us = adc_sampler_now_us();
+                if (((now_us - sample.timestamp_us) <= S3_SAMPLE_STALE_US)
+                    && (sample.value < S3_AIR_LEVEL)
+                    && ((0U == statistics[channel].samples)
+                        || (statistics[channel].last_sample_us
+                            != sample.timestamp_us)))
+                {
+                    if (sample.value < statistics[channel].minimum)
+                    {
+                        statistics[channel].minimum = sample.value;
+                    }
+                    if (sample.value > statistics[channel].maximum)
+                    {
+                        statistics[channel].maximum = sample.value;
+                    }
+                    statistics[channel].last_sample_us = sample.timestamp_us;
+                    statistics[channel].samples++;
+                }
             }
-            line_state = MSG_LINE_LOST;
-            publish_reading(error, false);
         }
+        (void)tk_dly_tsk((INT)S3_CAL_INTERVAL_MS);
     }
-    else
+    for (channel = 0U; channel < ADC_CH_COUNT; channel++)
     {
-        /* No ADC sample at all: the sampler is not running. */
-        publish_reading(0, false);
-    }
-}
-
-/* Per-channel statistics gathered during calibration. */
-typedef struct
-{
-    uint16_t min_val;
-    uint16_t max_val;
-    uint32_t sum;
-    uint32_t taken;
-    uint32_t airborne;      /* samples ignored: nothing under the sensor */
-} cal_stats_t;
-
-/*
- * Collect min/max/sum for one channel over the calibration pass.
- */
-static void cal_accumulate(uint8_t channel, cal_stats_t *p_stats)
-{
-    adc_sample_t sample;
-
-    if (!adc_sampler_read(channel, &sample))
-    {
-        /* No sample yet: nothing to record. */
-    }
-    else if (sample.value >= S3_AIR_LEVEL)
-    {
-        p_stats->airborne = p_stats->airborne + 1u;
-    }
-    else
-    {
-        if (sample.value < p_stats->min_val)
+        if (!calibration_word(&statistics[channel], &candidates[channel]))
         {
-            p_stats->min_val = sample.value;
+            b_valid = false;
+            APP_LOG((UB *)"[S3] cal ch%d FAILED: samples=%d, %d..%d\n",
+                      (INT)channel, (INT)statistics[channel].samples,
+                      (INT)statistics[channel].minimum,
+                      (INT)statistics[channel].maximum);
         }
-        if (sample.value > p_stats->max_val)
-        {
-            p_stats->max_val = sample.value;
-        }
-        p_stats->sum   = p_stats->sum + sample.value;
-        p_stats->taken = p_stats->taken + 1u;
     }
+    if (b_valid)
+    {
+        /* Commit all channels only after the whole transaction succeeds. */
+        __atomic_store_n(&g_left_cal, candidates[ADC_CH_LINE_L],
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(&g_right_cal, candidates[ADC_CH_LINE_R],
+                         __ATOMIC_RELEASE);
+        s3_barcode_calibrate(
+            (uint16_t)(candidates[ADC_CH_BARCODE] & CAL_THRESHOLD_MASK),
+            (uint16_t)(candidates[ADC_CH_BARCODE] >> CAL_BAND_SHIFT));
+        control |= CONTROL_CALIBRATED;
+    }
+    control &= (uint8_t)~CONTROL_CALIBRATING;
+    __atomic_store_n(&g_control, control, __ATOMIC_RELEASE);
+    return (b_valid ? E_OK : E_IO);
 }
 
-/* True if the channel itself saw both black and white. */
-static bool cal_swept(const cal_stats_t *p_stats)
+void line_task(INT stacd, void * p_exinf)
 {
-    return ((0u != p_stats->taken) && (p_stats->max_val > p_stats->min_val)
-            && ((uint32_t)(p_stats->max_val - p_stats->min_val)
-                >= S3_MIN_SWEEP_CONTRAST));
-}
+    uint8_t control = 0U;
+    uint32_t started_us = 0U;
+    uint32_t elapsed_us = 0U;
 
-/* Hysteresis band for a channel: a quarter of its contrast, clamped. */
-static uint16_t band_for(uint32_t contrast)
-{
-    uint32_t band = contrast / 4u;
-
-    if (band > S3_HYSTERESIS)
-    {
-        band = S3_HYSTERESIS;
-    }
-    else if (band < S3_MIN_BAND)
-    {
-        band = S3_MIN_BAND;
-    }
-    else
-    {
-        /* In range. */
-    }
-
-    return ((uint16_t)band);
-}
-
-/* Mean reading of a channel (0 if it produced no samples). */
-static uint32_t cal_mean(const cal_stats_t *p_stats)
-{
-    return ((0u == p_stats->taken) ? 0u : (p_stats->sum / p_stats->taken));
-}
-
-/*
- * Barcode threshold: the channel's own midpoint if it was swept, otherwise
- * halfway between its (white) mean and the line sensors' black reading.
- * PROVISIONAL: assumes the barcode sensor responds like the line sensors.
- */
-static void cal_barcode(const cal_stats_t *p_bc, uint32_t black_ref)
-{
-    uint32_t threshold = 0u;
-
-    if (cal_swept(p_bc))
-    {
-        threshold = ((uint32_t)p_bc->min_val + p_bc->max_val) / 2u;
-    }
-    else if ((0u != p_bc->taken)
-             && (black_ref >= (cal_mean(p_bc) + S3_MIN_CONTRAST)))
-    {
-        threshold = (cal_mean(p_bc) + black_ref) / 2u;
-    }
-    else
-    {
-        /* No usable reference: keep the current threshold. */
-    }
-
-    if (0u != threshold)
-    {
-        s3_set_barcode_threshold((uint16_t)threshold);
-        APP_LOG((UB*)"[S3] barcode threshold %d\n", (INT)threshold);
-    }
-}
-
-/* ---------------------------------------------------------------------
- * Public
- * --------------------------------------------------------------------- */
-
-EXPORT ER s3_calibrate(void)
-{
-    cal_stats_t  stats[ADC_CH_COUNT];
-    adc_sample_t sample;
-    uint32_t     count;
-    uint32_t     tail_sum   = 0u;
-    uint32_t     tail_taken = 0u;
-    uint32_t     white_c;
-    uint32_t     white_s;
-    uint32_t     black_ref  = 0u;
-    uint8_t      chan;
-    ER           ercd = E_OK;
-
-    for (chan = 0u; chan < ADC_CH_COUNT; chan++)
-    {
-        stats[chan].min_val = (uint16_t)S3_ADC_MAX;
-        stats[chan].max_val = 0u;
-        stats[chan].sum     = 0u;
-        stats[chan].taken   = 0u;
-        stats[chan].airborne = 0u;
-    }
-
-    b_calibrating = true;
-    APP_LOG((UB*)"[S3] calibrating for 3 s: slide across the line if you "
-                   "like, but END with the centre sensor on the line\n");
-
-    for (count = 0u; count < S3_CAL_SAMPLES; count++)
-    {
-        for (chan = 0u; chan < ADC_CH_COUNT; chan++)
-        {
-            cal_accumulate(chan, &stats[chan]);
-        }
-
-        /* The centre's BLACK level is taken from where the car sits at
-           the end, ready to start: the last S3_CAL_TAIL_SAMPLES. */
-        if (((count + S3_CAL_TAIL_SAMPLES) >= S3_CAL_SAMPLES)
-            && adc_sampler_read(ADC_CH_LINE_C, &sample)
-            && (sample.value < S3_AIR_LEVEL))
-        {
-            tail_sum   = tail_sum + sample.value;
-            tail_taken = tail_taken + 1u;
-        }
-
-        (void)tk_dly_tsk((TMO)S3_CAL_INTERVAL_MS);
-    }
-
-    b_calibrating = false;
-
-    if ((0u != stats[ADC_CH_LINE_L].airborne)
-        || (0u != stats[ADC_CH_LINE_C].airborne))
-    {
-        APP_LOG((UB*)"[S3] WARNING: car lifted during calibration "
-                       "(%d readings ignored) -- keep it on the surface\n",
-                  (INT)(stats[ADC_CH_LINE_L].airborne
-                        + stats[ADC_CH_LINE_C].airborne));
-    }
-
-    APP_LOG((UB*)"[S3] cal L %d..%d  C %d..%d  B %d..%d\n",
-              (INT)stats[0].min_val, (INT)stats[0].max_val,
-              (INT)stats[1].min_val, (INT)stats[1].max_val,
-              (INT)stats[2].min_val, (INT)stats[2].max_val);
-
-    /*
-     * WHITE levels: the lowest reading each sensor gave.  Sitting still
-     * with the side sensor on white that is its white; if the car was
-     * slid across, it is the white beside the line.  The centre's own
-     * white is only seen in a sweep; otherwise the side sensor's white
-     * stands in for it (measured: within ~50 counts of each other).
-     */
-    white_s = (0u != stats[ADC_CH_LINE_L].taken)
-            ? stats[ADC_CH_LINE_L].min_val : 0u;
-    white_c = cal_swept(&stats[ADC_CH_LINE_C])
-            ? stats[ADC_CH_LINE_C].min_val : white_s;
-
-    /*
-     * BLACK level of the centre: its mean over the last half second, where
-     * the car will start.  (Was: the maximum seen.  One high reading --
-     * the car tilted while being placed -- put the threshold ABOVE the
-     * line, so a car sitting on the line read white and drove off.)
-     */
-    black_ref = (0u != tail_taken) ? (tail_sum / tail_taken) : 0u;
-
-    if ((0u == stats[ADC_CH_LINE_L].taken)
-        || (black_ref < (white_c + S3_MIN_CONTRAST)))
-    {
-        ercd = E_IO;
-    }
-    else
-    {
-        black_centre     = (uint16_t)black_ref;
-        threshold_centre = (uint16_t)((white_c + black_ref) / 2u);
-        band_centre      = band_for(black_ref - white_c);
-
-        /* Side: white + a fixed margin.  Its black is never reliably
-           seen (it starts on white), and its maximum is as vulnerable to
-           a stray high reading as the centre's was. */
-        threshold_left = (uint16_t)(white_s + S3_SIDE_STATIC_OFFSET);
-        band_left      = band_for(2u * S3_SIDE_STATIC_OFFSET);
-    }
-
-    if (E_OK == ercd)
-    {
-        APP_LOG((UB*)"[S3] thresholds: side %d (white %d)  centre %d "
-                       "(white %d, black %d)\n",
-                  (INT)threshold_left, (INT)white_s,
-                  (INT)threshold_centre, (INT)white_c, (INT)black_ref);
-    }
-    else
-    {
-        APP_LOG((UB*)"[S3] CAL FAILED: the centre sensor must END on the "
-                       "line (it read %d, white %d)\n",
-                  (INT)black_ref, (INT)white_c);
-
-        /* "4095..0" on a channel means it produced no samples at all:
-           print the ADC state so the cause is visible on the console. */
-        adc_sampler_selftest();
-    }
-
-    if (E_OK == ercd)
-    {
-        cal_barcode(&stats[ADC_CH_BARCODE], black_ref);
-    }
-
-    return (ercd);
-}
-
-EXPORT void line_task(INT stacd, void *p_exinf)
-{
     (void)stacd;
     (void)p_exinf;
-
     for (;;)
     {
         (void)app_wait_period();
-
-        if (b_active)
+        started_us = adc_sampler_now_us();
+        control = __atomic_load_n(&g_control, __ATOMIC_ACQUIRE);
+        if (g_line_epoch != (control & CONTROL_EPOCH_MASK))
         {
-            if (!b_was_active)
-            {
-                /* Rising edge of START: begin from a clean debounce. */
-                lost_count = 0u;
-                last_error = 0;     /* no turn direction left over */
-            }
+            g_line_epoch = control & CONTROL_EPOCH_MASK;
+            g_junction_count = 0U;
+            g_last_error = 0;
+            publish_reading(0, false, 0U, MSG_LINE_IDLE, 0U);
+        }
+        if ((CONTROL_ACTIVE | CONTROL_CALIBRATED)
+            == (control & (CONTROL_ACTIVE | CONTROL_CALIBRATED
+                           | CONTROL_CALIBRATING)))
+        {
             track_once();
         }
         else
         {
-            line_state = b_calibrating ? MSG_LINE_CAL : MSG_LINE_IDLE;
-            publish_reading(0, false);
+            g_junction_count = 0U;
+            g_last_error = 0;
+            publish_reading(0, false, 0U,
+                (0U != (control & CONTROL_CALIBRATING))
+                    ? MSG_LINE_CAL : MSG_LINE_IDLE, 0U);
         }
-
-        b_was_active = b_active;
+        elapsed_us = adc_sampler_now_us() - started_us;
+        if (elapsed_us > g_max_line_us)
+        {
+            __atomic_store_n(&g_max_line_us,
+                (uint16_t)((elapsed_us > 65535U) ? 65535U : elapsed_us),
+                __ATOMIC_RELAXED);
+        }
     }
 }
 
-EXPORT bool s3_read_line_word(uint32_t *p_word)
+uint16_t s3_line_max_us(void)
 {
-    bool b_ok = false;
+    return (__atomic_load_n(&g_max_line_us, __ATOMIC_RELAXED));
+}
 
-    if ((NULL != p_word) && b_published)
+bool s3_read_line_word(uint32_t * p_word)
+{
+    uint8_t status = __atomic_load_n(&g_status, __ATOMIC_ACQUIRE);
+    bool b_valid = (NULL != p_word) && (0U != (status & STATUS_PUBLISHED));
+
+    if (b_valid)
     {
-        *p_word = published_word;
-        b_ok    = true;
+        *p_word = __atomic_load_n(&g_line_word, __ATOMIC_ACQUIRE);
     }
-
-    return (b_ok);
+    return (b_valid);
 }
 
-EXPORT void s3_get_thresholds(uint16_t *p_side, uint16_t *p_centre)
+msg_line_state_t s3_get_line_state(void)
 {
-    if ((NULL != p_side) && (NULL != p_centre))
+    return ((msg_line_state_t)
+        (__atomic_load_n(&g_status, __ATOMIC_ACQUIRE) & STATUS_STATE_MASK));
+}
+
+bool s3_read_line_sensors(uint8_t * p_flags)
+{
+    uint32_t observation = __atomic_load_n(&g_sensor_word, __ATOMIC_ACQUIRE);
+    uint32_t stamp_ms = observation >> SENSOR_STAMP_SHIFT;
+    uint32_t age_ms = (app_now_ms() - stamp_ms) & SENSOR_STAMP_MASK;
+    bool b_valid = (NULL != p_flags) && s3_barcode_active()
+        && (0U != (observation & SENSOR_VALID_FLAG))
+        && (age_ms <= (S3_SAMPLE_STALE_US / US_PER_MS));
+
+    if (NULL != p_flags)
     {
-        *p_side   = threshold_left;
-        *p_centre = threshold_centre;
+        *p_flags = b_valid ? (uint8_t)(observation & SENSOR_FLAGS_MASK) : 0U;
+    }
+    return (b_valid);
+}
+
+void s3_set_active(bool b_on)
+{
+    uint8_t control = __atomic_load_n(&g_control, __ATOMIC_ACQUIRE);
+
+    /* A stop/start between line ticks must also restart confirmation. */
+    control = (uint8_t)(control + CONTROL_EPOCH_STEP);
+    if (b_on)
+    {
+        control |= CONTROL_ACTIVE;
+    }
+    else
+    {
+        control &= (uint8_t)~CONTROL_ACTIVE;
+    }
+    __atomic_store_n(&g_control, control, __ATOMIC_RELEASE);
+    /* Invalidate observations until the line task publishes in the new mode.
+     * Only the line task owns the debounce and last-error fields. */
+    __atomic_store_n(&g_sensor_word, 0U, __ATOMIC_RELEASE);
+    s3_barcode_reset();
+}
+
+bool s3_barcode_active(void)
+{
+    uint8_t control = __atomic_load_n(&g_control, __ATOMIC_ACQUIRE);
+
+    return ((CONTROL_ACTIVE | CONTROL_CALIBRATED)
+        == (control & (CONTROL_ACTIVE | CONTROL_CALIBRATED
+                       | CONTROL_CALIBRATING)));
+}
+
+void s3_get_thresholds(uint16_t * p_left, uint16_t * p_right)
+{
+    if ((NULL != p_left) && (NULL != p_right))
+    {
+        *p_left = (uint16_t)
+            (__atomic_load_n(&g_left_cal, __ATOMIC_ACQUIRE)
+             & CAL_THRESHOLD_MASK);
+        *p_right = (uint16_t)
+            (__atomic_load_n(&g_right_cal, __ATOMIC_ACQUIRE)
+             & CAL_THRESHOLD_MASK);
     }
 }
-
-EXPORT msg_line_state_t s3_get_line_state(void)
-{
-    return (line_state);
-}
-
-EXPORT void s3_set_active(bool b_on)
-{
-    b_active = b_on;
-}
-
-EXPORT bool s3_barcode_active(void)
-{
-    /* Barcode capture follows line tracking: both are off until START. */
-    return (b_active);
-}
-
-/* end of file */

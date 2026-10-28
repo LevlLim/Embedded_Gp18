@@ -419,31 +419,59 @@ static void test_buffer_guards(void)
  * --------------------------------------------------------------------- */
 static void test_barcode_decode(void)
 {
-    uint16_t widths[4];
-    uint8_t  conf = 0u;
+    static uint16_t const patterns[26] =
+    {
+        0x109U, 0x049U, 0x148U, 0x019U, 0x118U, 0x058U, 0x00DU,
+        0x10CU, 0x04CU, 0x01CU, 0x103U, 0x043U, 0x142U, 0x013U,
+        0x112U, 0x052U, 0x007U, 0x106U, 0x046U, 0x016U, 0x181U,
+        0x0C1U, 0x1C0U, 0x091U, 0x190U, 0x0D0U
+    };
+    uint16_t widths[S3_FRAME_ELEMENTS] = {0U};
+    uint16_t physical[S3_FRAME_ELEMENTS] = {0U};
+    uint16_t symbols[3] = {0x094U, 0U, 0x094U};
+    s3_barcode_result_t result = {0};
+    uint8_t letter = 0U;
+    uint8_t character = 0U;
+    uint8_t element = 0U;
+    uint8_t count = 0U;
+    uint8_t reverse = 0U;
 
-    printf("subsystem 3: barcode width classification\n");
-
-    widths[0] = 1000u; widths[1] = 1000u; widths[2] = 1000u; widths[3] = 2500u;
-    CHECK_EQ_INT(s3_decode_widths(widths, 4u, &conf), MSG_BC_STRAIGHT,
-                 "N,N,N,W -> STRAIGHT");
-    CHECK_EQ_INT(conf, 7, "one wide element -> confidence 7");
-
-    widths[0] = 2500u; widths[1] = 1000u; widths[2] = 1000u; widths[3] = 1000u;
-    CHECK_EQ_INT(s3_decode_widths(widths, 4u, &conf), MSG_BC_U_TURN,
-                 "W,N,N,N -> U_TURN");
-
-    /* Speed independence: the same symbol at half speed. */
-    widths[0] = 2000u; widths[1] = 2000u; widths[2] = 5000u; widths[3] = 2000u;
-    CHECK_EQ_INT(s3_decode_widths(widths, 4u, &conf), MSG_BC_LEFT,
-                 "N,N,W,N at half speed -> LEFT");
-
-    widths[0] = 10u; widths[1] = 10u; widths[2] = 10u; widths[3] = 10u;
-    CHECK_EQ_INT(s3_decode_widths(widths, 4u, &conf), MSG_BC_INVALID,
-                 "noise widths rejected");
-
-    CHECK_EQ_INT(s3_decode_widths(widths, 3u, &conf), MSG_BC_INVALID,
-                 "too few elements rejected");
+    printf("subsystem 3: real Code 39 alphabet, both orientations\n");
+    for (letter = 0U; letter < 26U; letter++)
+    {
+        symbols[1] = patterns[letter];
+        count = 0U;
+        for (character = 0U; character < 3U; character++)
+        {
+            for (element = 0U; element < 9U; element++)
+            {
+                widths[count] = (0U != (symbols[character]
+                    & (uint16_t)(1U << (8U - element)))) ? 10000U : 4000U;
+                count++;
+            }
+            if (character < 2U)
+            {
+                widths[count] = 4000U;
+                count++;
+            }
+        }
+        for (reverse = 0U; reverse < 2U; reverse++)
+        {
+            for (element = 0U; element < S3_FRAME_ELEMENTS; element++)
+            {
+                physical[element] = widths[reverse ? 28U - element : element];
+            }
+            CHECK_TRUE(s3_decode_code39(physical, count, 80000U, 80000U,
+                                        &result), "valid alphabet frame");
+            CHECK_EQ_INT(result.letter, 'A' + letter, "actual letter retained");
+        }
+    }
+    physical[0] = 0U;
+    CHECK_TRUE(!s3_decode_code39(physical, count, 80000U, 80000U, &result),
+               "zero-width frame rejected");
+    CHECK_TRUE(!s3_decode_code39(widths, (uint8_t)(count - 1U),
+                               80000U, 80000U, &result),
+               "incomplete frame rejected");
 }
 
 /* ---------------------------------------------------------------------

@@ -1,72 +1,186 @@
-# Subsystem 3: Line + Barcode
+# Buddy 3: sensors hugging the centre line
 
-**Owner:** Buddy 3: Zhi Kai (2500466). Only the owner edits this folder; shared files (`app.h`, `app_main.c`, `msg_defs.*`, `fault.*`, `drivers/`, `template_patches/`) change by team agreement.
+Buddy 3 owns this folder. Motor commands and mission decisions belong to
+Buddies 2 and 5; this change adds sensing and a junction observation interface.
 
-## Your files
+## Mounting and wiring
 
-| File | What it does |
-|---|---|
-| `subsystem3.h/.c` | init/start, thresholds and sensor position settings |
-| `adc_sampler.h/.c` | the ONLY code that touches the ADC: round-robin GP26/27/28 at 1.5 kS/s, polled every 1 ms |
-| `line_sensor.c` | 5 ms line task, calibration (swept or static), steering error |
-| `barcode_decoder.c` | 1 ms barcode task, bar widths, decode |
-| `subsystem3_test.c` | your car test |
+Viewed from above, facing forwards:
 
-## How to run your tests
-
-**1. Host tests (on your laptop, no car needed).** These check the pure logic in your files.
-
-```sh
-cd testing/host
-make test3
+```text
+                       forward ^
+             white   BLACK LINE   white          barcode strip
+               L         ||         R                 B
+             GP26        ||       GP27              GP28
 ```
 
-It ends with `=== X/X checks passed ===`; any `FAIL:` line names the check and the source line. `make` with no target runs every buddy's tests, so run it before you push to check you haven't broken anyone else.
+- GP26 / ADC0 is the LEFT edge sensor (`ADC_CH_LINE_L`).
+- GP27 / ADC1 is the RIGHT edge sensor (`ADC_CH_LINE_R`). The legacy
+  `ADC_CH_LINE_C` name and the shared `PIN_IR_LINE_C` map still refer to this
+  same pin for compatibility. There is no sensor on the centre line now.
+- GP28 / ADC2 remains dedicated to Code 39 barcodes.
 
-**2. Car test (on the real hardware).** This runs only your `subsystem3_test.c`, with every task of the car running around it.
+Mount the line sensors at equal height, just outside opposite edges of the
+black line. Sensor spacing must exceed the line width, allowing for each
+sensor's optical footprint. For an 18 mm line, the old 12–15 mm spacing is no
+longer appropriate. Set the actual spacing by checking that BOTH sensors see
+white when aligned and that a small sideways movement makes one see black.
+Keep GP28's VBAT measurement jumper open on the Robo Pico board.
 
-| Build with | Choose |
-|---|---|
-| CMake (Pico VS Code) | preset **"Self-test: Buddy 3 only"** (`test-b3`) |
-| make | `make TEST_BUDDY=3 -j8` |
+## Behaviour
 
-Flash `mtk3pico_smp1_usb_cdc_wifi_test_b3.uf2` and open the serial monitor. The firmware waits for the boot calibration to finish (`[S5] READY`), then prints `[TEST] === test run start: Buddy 3 only ===` and your `[TEST-S3]` lines. Look for `PASS` / `FAIL` on each.
+The line task runs every 5 ms. After successful calibration and activation:
 
-## Host tests (`make test3`)
+| Left | Right | Error | Meaning |
+| --- | --- | ---: | --- |
+| White | White | 0 | Continue straight; the line may also be missing |
+| Black | White | -50 | Steer left |
+| White | Black | +50 | Steer right |
+| Black | Black | 0 | Junction candidate; no preferred steering direction |
 
-| Suite | Checks |
-|---|---|
-| barcode message | saturation and guards on the 1-byte barcode message |
-| barcode width classification | narrow/wide decode from synthetic widths, noise rejected |
-| single-word records (shared) | the line word you publish to Motion Control |
+Three consecutive DISTINCT both-black ADC pairs confirm a junction candidate
+(`S3_JUNCTION_CONFIRM_SAMPLES`). This is nominally three 5 ms samples, with
+10 ms between the first and third observations. A duplicate pair cannot advance
+confirmation. Either white reading, invalid/stale ADC data, deactivation or
+recalibration breaks confirmation. After clearing, a new encounter must confirm
+again. Persistent both-black produces a level indication, not repeated events.
 
-## Car test (`test_b3` image)
+All four fresh combinations publish valid `MSG_LINE_TRACK` steering data.
+`MSG_LINE_LOST` now means acquisition unavailable/stale, not both-white.
+The higher ADC value is treated as black, as in the preceding integrated code.
+Hysteresis retains each sensor's previous classification near its threshold.
 
-Car on the desk **on the track**, USB connected.
+Both-white cannot prove the presence of a line. Both-black cannot distinguish
+a T, crossing or wide black marking. These are physical sensing limitations.
 
-| Line | Pass when |
-|---|---|
-| `[ADC] samples=N overruns=0` | samples climbing, **0 overruns** (T7) |
-| `line err=… valid=… age=N ms` | age a few ms (the reading is fresh) |
-| `SLIDE THE CAR SLOWLY ACROSS THE LINE (6 s)` | slide the car sideways back and forth over the line while it prints |
-| `PASS: side sensor saw black and white` / `centre` | each sensor went above AND below its threshold. A FAIL means that sensor's height, wiring or threshold is wrong. |
-| `N,N,N,W: PASS` … | synthetic barcode decodes |
+## Calibrate and test on the car
 
-Tip: during the 3 s boot calibration, slide the car across the line too, so both sensors get a measured threshold (`… swept` in the `[S3] thresholds:` line).
+1. Build the **Self-test: Buddy 3 only** preset (`test-b3`). During the 3 s boot
+   calibration, sweep EACH of GP26, GP27 and GP28 across black AND white. The
+   calibration requires enough fresh samples and contrast on all three inputs;
+   a partial/failed calibration does not replace any thresholds.
+2. Check `[TEST-S3]` output for the new pin roles, truth table, ADC freshness
+   and `*A* -> A -> left` decode result. This test sends no motion command.
+3. Test normal line-following at low speed. Aligned: both white, error 0.
+   Move the line under GP26: negative error. Under GP27: positive error.
+   Confirm that the actual wheel response steers in the stated direction.
+4. Hold both over black for at least three samples. Read
+   `s3_read_line_sensors()` to check `S3_LINE_JUNCTION`. Brief black noise and
+   interrupted sequences must not confirm. Clear either sensor and verify
+   the flag clears. A subsequent encounter must confirm again.
+5. Check white/white for several seconds: valid zero error, no line-lost event.
+   Confirm ADC failure/staleness still invalidates steering and junction data.
+6. Verify smooth bends, actual sensor spacing/height, lighting and speed on the
+   real track. Do not treat a successful synthetic decode as a physical scan.
 
-## Still to test on the bench
+The debug output labels GP26 as `left` and GP27 as `right`, and includes `J1`
+for a confirmed junction (`J0` otherwise, `J?` if observations are unavailable).
+Its B/W labels compare a threshold without hysteresis;
+`s3_read_line_sensors()` reports the actual classification.
 
-These need the real track or instruments, so the self-test cannot do them:
+The actual car's measured settings are preserved: readings at or above 3950
+are treated as no surface and excluded from calibration/capture. Either line
+sensor losing its surface invalidates the line reading, rather than treating
+air as black or aligned white. A calibration sweep needs at least 400 ADC
+counts of contrast on each channel, avoiding the measured black-level noise.
 
-- **Sensor height and spacing:** side sensor 12–15 mm from the centre one (never more than 18 mm, the line width), both the same height.
-- **Barcode sensor (GP28):** mount it over the bars (they start 20 mm beyond the line edge) and drive over a real barcode; check the console prints `[S5] barcode cmd N conf N` with the right command, and tune the PROVISIONAL `S3_QUIET_ZONE_US`, `S3_MIN_BAR_US`, `S3_WIDE_RATIO_Q8` at your speed.
-- **Lighting (assumption A2):** log readings in the bright and shadowed parts of the track.
+## Host regressions
 
-## Settings you are likely to tune
+From PowerShell, run this folder's `tests/Run-HostTests.ps1` (requires host gcc).
+Optional parameters: `-Compiler <gcc-path>` and `-OutputDirectory <path>`.
+It builds with warnings as errors and runs production-code regressions for:
 
-| What | Where | Now |
-|---|---|---|
-| Side sensor left/right of centre | `S3_SIDE_SENSOR_RIGHT` | 1 (right) |
-| Static side threshold (white +) | `S3_SIDE_STATIC_OFFSET` | 400 |
-| Minimum contrast for a sweep | `S3_MIN_SWEEP_CONTRAST` | 120 |
-| Line-lost debounce | `S3_LOST_DEBOUNCE` | 4 × 5 ms |
+- all four edge combinations, sustained white, steering sign and zero error;
+- junction debounce, duplicate rejection, clearing, rearming and stop/start;
+- transactional three-channel calibration, ADC failure, stale observations;
+- all 26 Code 39 letters in both directions, malformed scans and queue limits;
+- ADC sampling/timestamp behaviour and retained-letter telemetry compatibility.
+- independent Code 39 reference patterns at three timings in both directions;
+- exact quiet-zone boundaries, back-to-back scans, and short quiet-zone rejection;
+- delayed batch rejection before publication, calibration changes mid-capture;
+- initialization/task retries without duplicate objects, and ADC counter wrap.
+
+The team host harness keeps its other-buddy tests and now checks real A-Z frames instead of the former four-width placeholder.
+
+## Interface for junction handling
+
+```c
+uint8_t flags = 0U;
+if (s3_read_line_sensors(&flags))
+{
+    bool junction = (0U != (flags & S3_LINE_JUNCTION));
+    bool left_black = (0U != (flags & S3_LINE_LEFT_BLACK));
+    bool right_black = (0U != (flags & S3_LINE_RIGHT_BLACK));
+    /* Controller consumes these observations in its own manoeuvre state. */
+}
+```
+
+The call returns false and clears the output for unavailable, inactive,
+uncalibrated or stale input; a null pointer also returns false. A true result
+with zero flags means both white. Flags and timestamp are published together in
+one atomic 32-bit record (three flag bits, one valid bit, 28-bit millisecond
+timestamp). Junction flags use this Buddy 3 API without new shared events.
+Retained-letter telemetry separately uses schema version 3: 13 bytes, with
+byte 12 encoding A=1 through Z=26, or zero before the first valid decode.
+Telemetry readers must recognize schema 3. The junction API is a fresh
+LEVEL: poll faster than the junction can pass beneath the sensors, or add an
+agreed queued event interface.
+
+## Controller work required before barcode-directed junction driving
+
+The current Buddy 5 controller executes a barcode immediately. It does NOT yet
+remember it and wait for `S3_LINE_JUNCTION`. Buddy 3's retained barcode API
+(`s3_read_barcode`) already provides the last letter, mapped direction,
+confidence and sequence. A retained result survives stop/start, so its presence
+alone must not arm a new mission or repeat a consumed instruction.
+
+The controller needs to remember a fresh accepted command, latch a confirmed
+junction once, position the axle, execute the turn and reacquire the outgoing
+line. The axle-to-sensor distance and pivot behaviour require track measurements;
+there is no guessed 90-degree manoeuvre in Buddy 3.
+
+Two existing integration assumptions also need changing:
+
+- Buddy 2's `line_in_view()` and Buddy 5's `poll_running()` currently use
+  `MSG_LINE_TRACK` as proof the line was reacquired. In this layout, WHITE/WHITE
+  is TRACK too. Use the fresh left/right flags plus manoeuvre history instead.
+- During a 90-degree turn, first clear the original both-black junction, then
+  require the direction-appropriate edge crossing before settling into
+  WHITE/WHITE. WHITE/WHITE by itself must not finish a turn/search. Keep an
+  encoder/angle limit and a timeout if reacquisition fails.
+
+These changes belong to the Motion Control/Vehicle Controller integration;
+ordinary edge following and junction sensing are implemented in Buddy 3 here.
+
+## Barcode repairs (28 October 2026)
+
+- A white-to-black edge at exactly the required trailing quiet interval now
+  publishes the completed barcode and can start the next frame on that edge.
+  Short trailing white still rejects the candidate.
+- Buffered samples whose batch end is already too old are rejected before
+  decoding, so delayed capture cannot publish an obsolete command first.
+- Calibration changes cancel partial frames. Capture compares the calibration
+  snapshot directly as well as honoring the reset ticket, covering preemption
+  between the threshold commit and reset request. The retained pair survives.
+- Mapping outputs are checked before packing: only STRAIGHT, LEFT, RIGHT and
+  U_TURN fit the existing interface. An unsupported value preserves the prior
+  pair and emits no replacement command. Change assignments in
+  `barcode_mapping.c`; keep the supported direction enum/interface stable.
+- Failed barcode-buffer initialization remains retryable. Startup remembers
+  already-created tasks so retrying the next step cannot duplicate a writer.
+- The ADC ring keeps its full history across the internal write-counter wrap.
+- The pure width decoder and live capture apply consistent gap/time limits.
+
+The on-car synthetic A test prints the mapped direction dynamically, so a
+future reassignment of A does not require editing the hardware self-test.
+Host assertions for the temporary A/B/C/D policy should be updated alongside
+an intentional policy change. Runtime mapping remains separate from decoding.
+
+## Build in Car_VSC
+
+Open PowerShell in `Car_VSC/AAI18_firmware` and run `./Build-Buddy3.ps1` for
+the full-car application with Buddy 3 self-tests. Run
+`./Build-Buddy3.ps1 -Normal` for the normal full-car application.
+The helper configures and builds the existing `test-b3` or `usb` CMake preset
+using this project's sources, SDK and build directory. The resulting UF2 is
+printed when the build succeeds.

@@ -1,0 +1,31 @@
+/* Generated from installed ReportLab code39._patterns. */
+static char const * const g_reference[26] =
+{
+    "BsbsbSbsB",
+    "bsBsbSbsB",
+    "BsBsbSbsb",
+    "bsbsBSbsB",
+    "BsbsBSbsb",
+    "bsBsBSbsb",
+    "bsbsbSBsB",
+    "BsbsbSBsb",
+    "bsBsbSBsb",
+    "bsbsBSBsb",
+    "BsbsbsbSB",
+    "bsBsbsbSB",
+    "BsBsbsbSb",
+    "bsbsBsbSB",
+    "BsbsBsbSb",
+    "bsBsBsbSb",
+    "bsbsbsBSB",
+    "BsbsbsBSb",
+    "bsBsbsBSb",
+    "bsbsBsBSb",
+    "BSbsbsbsB",
+    "bSBsbsbsB",
+    "BSBsbsbsb",
+    "bSbsBsbsB",
+    "BSbsBsbsb",
+    "bSBsBsbsb",
+};
+static char const g_star[] = "bSbsBsBsb";

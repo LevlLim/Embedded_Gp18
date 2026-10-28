@@ -101,6 +101,7 @@ static bool take_motion_fields(s1_motion_fields_t *p_copy)
 static void gather(msg_telemetry_t *p_frame)
 {
     msg_line_t line;
+    s3_barcode_result_t barcode = {0};
     uint32_t   line_word;
     uint8_t    hump;
 
@@ -125,7 +126,13 @@ static void gather(msg_telemetry_t *p_frame)
     p_frame->b_hump_invalid  = s4_run_data_invalid();
     p_frame->tilt_deg        = s4_get_tilt_deg();
     p_frame->obst_distance_cm = s5_get_obstacle_distance_cm();
-    p_frame->last_barcode    = s3_get_last_barcode();
+    p_frame->last_barcode = (uint8_t)MSG_BC_NONE;
+    p_frame->last_letter = 0U;
+    if (s3_read_barcode(&barcode))
+    {
+        p_frame->last_barcode = (uint8_t)barcode.direction;
+        p_frame->last_letter = barcode.letter;
+    }
     p_frame->fault_mask      = fault_get();
     p_frame->wifi_state      = (uint8_t)conn_state;
 }
@@ -198,6 +205,8 @@ static void print_debug_line(void)
     uint16_t     thr_ctr  = 0u;
     int32_t      duty_l   = 0;
     int32_t      duty_r   = 0;
+    uint8_t      sensors = 0U;
+    bool         b_sensors_fresh = s3_read_line_sensors(&sensors);
 
     (void)adc_sampler_read(ADC_CH_LINE_L, &s_side);
     (void)adc_sampler_read(ADC_CH_LINE_C, &s_centre);
@@ -208,7 +217,7 @@ static void print_debug_line(void)
         msg_unpack_line(word, &line);
     }
 
-    APP_LOG((UB*)"[DBG] side %4d/%4d %s  ctr %4d/%4d %s  err %3d %s"
+    APP_LOG((UB*)"[DBG] left %4d/%4d %s  right %4d/%4d %s  err %3d %s J%s"
                    "  duty L %3d R %3d  pitch %3d roll %3d%s\n",
               (INT)s_side.value, (INT)thr_side,
               ((uint32_t)s_side.value > thr_side) ? "B" : "W",
@@ -216,6 +225,8 @@ static void print_debug_line(void)
               ((uint32_t)s_centre.value > thr_ctr) ? "B" : "W",
               (INT)line.error,
               line.b_valid ? "ok" : "--",
+              !b_sensors_fresh ? "?" : ((0U != (sensors & S3_LINE_JUNCTION))
+                  ? "1" : "0"),
               (INT)duty_l, (INT)duty_r,
               (INT)s4_get_tilt_deg(), (INT)s4_get_roll_deg(),
               (0u != ((uint32_t)fault_get() & FAULT_IMU)) ? " IMU-FAULT"
@@ -234,6 +245,7 @@ static void send_state_frame(void)
     uint8_t            len;
 
     gather(&frame);
+    s3_report_barcode();
 
     if (take_motion_fields(&motion))
     {
