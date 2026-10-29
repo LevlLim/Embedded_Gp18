@@ -173,8 +173,8 @@ ordinary edge following and junction sensing are implemented in Buddy 3 here.
 
 The on-car synthetic A test prints the mapped direction dynamically, so a
 future reassignment of A does not require editing the hardware self-test.
-Host assertions for the temporary A/B/C/D policy should be updated alongside
-an intentional policy change. Runtime mapping remains separate from decoding.
+The host tests check mapping validity and decoder independence without
+hardcoding the temporary letter assignments. Mapping remains separate from decoding.
 
 ## Build in Car_VSC
 
@@ -184,3 +184,28 @@ the full-car application with Buddy 3 self-tests. Run
 The helper configures and builds the existing `test-b3` or `usb` CMake preset
 using this project's sources, SDK and build directory. The resulting UF2 is
 printed when the build succeeds.
+
+
+## Change the letter mapping
+
+Edit only the 26-character `g_barcode_mapping` string in `barcode_mapping.c`:
+
+```c
+    /* ABCDEFGHIJKLMNOPQRSTUVWXYZ */
+      "LRSUSSSSSSSSSSSSSSSSSSSSSS";
+```
+
+Each position is the action for the letter above it. Use L=left, R=right,
+S=straight, U=U-turn. The current assignments are A=left, B=right, C=straight,
+D=U-turn and E..Z=straight. For example, change the first character to R to
+make A mean right. Keep exactly 26 uppercase characters.
+
+Length mistakes fail compilation. Unsupported characters fail mapping
+validation and barcode initialization; no unsupported command is published.
+Run the host regressions, then rebuild/flash with `./Build-Buddy3.ps1` (or
+`-Normal`). The decoded/retained LETTER and the four-direction interface are
+independent of the assignments, so no other subsystem needs editing.
+
+A future CSV option can generate this table during the build. This version
+uses the C string; it does not load a CSV at runtime or read PC files from
+the Pico. Mapping changes require rebuilding and reflashing firmware.

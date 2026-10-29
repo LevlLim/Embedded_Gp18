@@ -464,6 +464,11 @@ ER s3_barcode_init(void)
     ER error = E_OK;
     ID handle = (ID)0;
 
+    if (!barcode_mapping_is_valid())
+    {
+        APP_LOG((UB *)"[S3] invalid mapping: use 26 L/R/S/U commands for A..Z\n");
+        return (E_PAR);
+    }
     if ((ID)0 == g_h_barcode)
     {
         config.mbfatr = TA_TFIFO;

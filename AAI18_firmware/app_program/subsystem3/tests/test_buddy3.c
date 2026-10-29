@@ -507,7 +507,7 @@ static void test_calibration_reset_and_limits(void)
     g_capture = 0U;
     feed_frame(g_letter_patterns[1], true, 4000U, 10000U);
     TEST_CHECK(s3_read_barcode(&result) && 'B' == result.letter
-               && result.b_reverse && MSG_BC_RIGHT == result.direction);
+               && result.b_reverse && barcode_mapping_direction('B') == result.direction);
 }
 
 static void test_alphabet(void)
@@ -542,10 +542,12 @@ static void test_alphabet(void)
             TEST_CHECK(!s3_take_barcode(&command));
         }
     }
-    TEST_CHECK(MSG_BC_LEFT == barcode_mapping_direction('A'));
-    TEST_CHECK(MSG_BC_RIGHT == barcode_mapping_direction('B'));
-    TEST_CHECK(MSG_BC_STRAIGHT == barcode_mapping_direction('C'));
-    TEST_CHECK(MSG_BC_U_TURN == barcode_mapping_direction('D'));
+    TEST_CHECK(barcode_mapping_is_valid());
+    for (letter = (uint8_t)'A'; letter <= (uint8_t)'Z'; letter++)
+    {
+        msg_barcode_cmd_t direction = barcode_mapping_direction(letter);
+        TEST_CHECK(direction >= MSG_BC_STRAIGHT && direction <= MSG_BC_U_TURN);
+    }
     TEST_CHECK(MSG_BC_INVALID == barcode_mapping_direction('a'));
     TEST_CHECK(MSG_BC_INVALID == barcode_mapping_direction('0'));
 }
@@ -584,7 +586,7 @@ static void test_invalid_and_queues(void)
     g_send_error = E_OBJ;
     feed_frame(g_letter_patterns[0], false, 6000U, 16000U);
     TEST_CHECK(s3_read_barcode(&result));
-    TEST_CHECK('A' == result.letter && MSG_BC_LEFT == result.direction);
+    TEST_CHECK('A' == result.letter && barcode_mapping_direction('A') == result.direction);
     g_send_error = E_OK;
     for (index = 0U; index < 6U; index++)
     {

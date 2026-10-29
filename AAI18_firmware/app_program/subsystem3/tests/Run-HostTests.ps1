@@ -18,6 +18,8 @@ $suites = @(
         (Join-Path $PSScriptRoot 'test_buddy3.c'),
         (Join-Path $appRoot 'subsystem3/barcode_mapping.c'),
         (Join-Path $appRoot 'msg_defs.c')) },
+    @{ Name = 'test_mapping'; Sources = @(
+        (Join-Path $PSScriptRoot 'test_mapping.c')) },
     @{ Name = 'test_adc'; Sources = @(
         (Join-Path $PSScriptRoot 'test_adc.c')) },
     @{ Name = 'test_startup'; Sources = @(
