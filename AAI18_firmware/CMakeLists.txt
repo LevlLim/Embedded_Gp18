@@ -45,6 +45,7 @@ set(AAI18_NET none CACHE STRING "Network stack: none or lwip")
 set_property(CACHE AAI18_NET PROPERTY STRINGS none lwip)
 option(AAI18_MQTT "MQTT client (needs AAI18_NET=lwip)" OFF)
 option(AAI18_TEST "Build the subsystem self-tests (APP_TEST=1)" OFF)
+option(AAI18_BARCODE_BENCH "Stationary hand scanner; motors disabled" OFF)
 set(AAI18_TEST_BUDDY 0 CACHE STRING
     "Self-test of ONE buddy only: 1..5 (implies AAI18_TEST), 0 = all")
 set_property(CACHE AAI18_TEST_BUDDY PROPERTY STRINGS 0 1 2 3 4 5)
@@ -130,6 +131,10 @@ else()
     set(APP_TEST 0)
 endif()
 
+if(AAI18_BARCODE_BENCH AND (AAI18_TEST OR NOT AAI18_TEST_BUDDY EQUAL 0))
+    message(FATAL_ERROR "Barcode bench mode uses its own entry point; disable self-tests")
+endif()
+
 # Image name, exactly as the makefile names it.
 set(EXE_NAME "mtk3pico_smp1_${CONSOLE}")
 if(WIFI STREQUAL "cyw43")
@@ -148,6 +153,10 @@ if(AAI18_TEST AND NOT AAI18_TEST_BUDDY EQUAL 0)
     string(APPEND EXE_NAME "_test_b${AAI18_TEST_BUDDY}")
 elseif(AAI18_TEST)
     string(APPEND EXE_NAME "_test")
+endif()
+
+if(AAI18_BARCODE_BENCH)
+    string(APPEND EXE_NAME "_barcode_bench")
 endif()
 
 message(STATUS "AAI18 build: CONSOLE=${CONSOLE} WIFI=${WIFI} NET=${AAI18_NET} "
@@ -276,6 +285,7 @@ set(C_ONLY_FLAGS -std=gnu11 -O2 -g3 -mfloat-abi=soft)
 set(ASM_ONLY_FLAGS -O2 -g3)
 set(DEFS CNF_SMP=1)
 set(C_DEFS APP_TEST=${APP_TEST} APP_TEST_BUDDY=${AAI18_TEST_BUDDY}
+           S3_BARCODE_BENCH=$<BOOL:${AAI18_BARCODE_BENCH}>
            TM_CONSOLE_UART=${CRASH_REPORT})
 set(C_INCS)
 set(C_EXTRA)

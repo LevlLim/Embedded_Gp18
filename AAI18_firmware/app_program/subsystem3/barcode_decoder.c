@@ -41,14 +41,14 @@ static uint16_t const g_letter_patterns[S3_LETTER_COUNT] =
 static ID g_h_barcode = (ID)0;
 static uint16_t volatile g_latest_result = 0U;
 static uint32_t volatile g_calibration =
-    (S3_ADC_MAX / 2U) | (S3_HYSTERESIS << 12U);
+    S3_BARCODE_THRESHOLD | (S3_FIXED_BAND << 12U);
 static uint8_t volatile g_reset_ticket = 0U;
 
 /* Private capture: count (5), dark (1), colour known (1), capturing (1). */
 static uint8_t g_capture = 0U;
 static uint8_t g_seen_ticket = 0U;
 static uint32_t g_capture_calibration = 0U;
-static uint16_t g_widths[S3_FRAME_ELEMENTS];
+static s3_bar_width_t g_widths[S3_FRAME_ELEMENTS];
 static uint16_t g_candidate = 0U;
 static uint32_t g_edge_us = 0U;
 static uint32_t g_frame_us = 0U;
@@ -77,7 +77,7 @@ static bool unpack_result(uint16_t word, s3_barcode_result_t * p_result)
     return (b_valid);
 }
 
-static uint16_t logical_width(uint16_t const * p_widths, uint8_t index,
+static s3_bar_width_t logical_width(s3_bar_width_t const * p_widths, uint8_t index,
                               bool b_reverse)
 {
     uint8_t physical = b_reverse
@@ -88,12 +88,12 @@ static uint16_t logical_width(uint16_t const * p_widths, uint8_t index,
 
 /* Nine-element insertion sort runs only at a complete frame, not per ADC
  * sample. The largest three must separate cleanly from the six narrows. */
-static bool decode_character(uint16_t const * p_widths, uint8_t offset,
+static bool decode_character(s3_bar_width_t const * p_widths, uint8_t offset,
                              bool b_reverse, uint16_t * p_pattern,
-                             uint16_t * p_narrow, uint8_t * p_confidence)
+                             s3_bar_width_t * p_narrow, uint8_t * p_confidence)
 {
-    uint16_t sorted[S3_CHAR_ELEMENTS] = {0U};
-    uint16_t value = 0U;
+    s3_bar_width_t sorted[S3_CHAR_ELEMENTS] = {0U};
+    s3_bar_width_t value = 0U;
     uint16_t pattern = 0U;
     uint32_t separation = 0U;
     uint8_t index = 0U;
@@ -146,15 +146,15 @@ static bool decode_character(uint16_t const * p_widths, uint8_t offset,
     return (b_valid);
 }
 
-static bool decode_orientation(uint16_t const * p_widths, bool b_reverse,
+static bool decode_orientation(s3_bar_width_t const * p_widths, bool b_reverse,
                                uint32_t leading_us,
                                s3_barcode_result_t * p_result,
                                uint32_t * p_quiet_us)
 {
     uint16_t pattern = 0U;
-    uint16_t narrow = 0U;
-    uint16_t widest_narrow = 0U;
-    uint16_t gap = 0U;
+    s3_bar_width_t narrow = 0U;
+    s3_bar_width_t widest_narrow = 0U;
+    s3_bar_width_t gap = 0U;
     uint8_t confidence = 7U;
     uint8_t char_confidence = 0U;
     uint8_t character = 0U;
@@ -227,7 +227,7 @@ static bool decode_orientation(uint16_t const * p_widths, bool b_reverse,
     return (b_valid);
 }
 
-bool s3_decode_code39(uint16_t const * p_widths, uint8_t count,
+bool s3_decode_code39(s3_bar_width_t const * p_widths, uint8_t count,
                      uint32_t leading_white_us, uint32_t trailing_white_us,
                      s3_barcode_result_t * p_result)
 {
@@ -326,10 +326,12 @@ static void publish_candidate(void)
         (void)tk_rcv_mbf(g_h_barcode, discarded, TMO_POL);
         error = tk_snd_mbf(g_h_barcode, bytes, S3_BARCODE_WIRE_BYTES, TMO_POL);
     }
+#if !S3_BARCODE_BENCH
     if (E_OK == error)
     {
         s5_post_event(S5_EVT_BARCODE);
     }
+#endif
     clear_frame();
 }
 
@@ -417,7 +419,7 @@ static void process_sample(adc_sample_t const * p_sample)
                 }
                 else
                 {
-                    g_widths[count] = (uint16_t)duration;
+                    g_widths[count] = (s3_bar_width_t)duration;
                     count++;
                     g_capture = (uint8_t)
                         ((g_capture & (uint8_t)~COUNT_MASK) | count);

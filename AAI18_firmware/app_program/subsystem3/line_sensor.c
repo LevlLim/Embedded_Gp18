@@ -33,8 +33,10 @@
 static uint8_t volatile g_control = 0U;
 static uint8_t volatile g_status = (uint8_t)MSG_LINE_IDLE;
 static uint32_t volatile g_line_word = 0U;
-static uint32_t volatile g_left_cal = S3_ADC_MAX / 2U;
-static uint32_t volatile g_right_cal = S3_ADC_MAX / 2U;
+static uint32_t volatile g_left_cal =
+    S3_LEFT_THRESHOLD | (S3_FIXED_BAND << CAL_BAND_SHIFT);
+static uint32_t volatile g_right_cal =
+    S3_RIGHT_THRESHOLD | (S3_FIXED_BAND << CAL_BAND_SHIFT);
 /* One atomic record: three sensor flags, valid bit, 28-bit ms timestamp. */
 static uint32_t volatile g_sensor_word = 0U;
 static int8_t g_last_error = 0;
@@ -237,6 +239,36 @@ static bool calibration_word(cal_stats_t const * p_stats,
         }
     }
     return (b_valid);
+}
+
+ER s3_prepare(void)
+{
+    uint8_t control = __atomic_load_n(&g_control, __ATOMIC_ACQUIRE);
+
+    /* Gate both sensing tasks while publishing the complete fixed profile.
+     * The epoch discards old junction/steering history on the next line tick.
+     * No ADC sweep, delay, flash write or motor command is performed here.
+     */
+    control = (uint8_t)((control & (uint8_t)~CONTROL_CALIBRATED)
+                        | CONTROL_CALIBRATING);
+    control = (uint8_t)(control + CONTROL_EPOCH_STEP);
+    __atomic_store_n(&g_control, control, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_sensor_word, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_left_cal,
+        S3_LEFT_THRESHOLD | (S3_FIXED_BAND << CAL_BAND_SHIFT),
+        __ATOMIC_RELEASE);
+    __atomic_store_n(&g_right_cal,
+        S3_RIGHT_THRESHOLD | (S3_FIXED_BAND << CAL_BAND_SHIFT),
+        __ATOMIC_RELEASE);
+    s3_barcode_calibrate(S3_BARCODE_THRESHOLD, S3_FIXED_BAND);
+    control = (uint8_t)((control | CONTROL_CALIBRATED)
+                        & (uint8_t)~CONTROL_CALIBRATING);
+    __atomic_store_n(&g_control, control, __ATOMIC_RELEASE);
+    APP_LOG((UB *)"[S3] fixed thresholds: left %d, right %d, barcode %d; "
+                   "band %d -- no boot sweep\n",
+              (INT)S3_LEFT_THRESHOLD, (INT)S3_RIGHT_THRESHOLD,
+              (INT)S3_BARCODE_THRESHOLD, (INT)S3_FIXED_BAND);
+    return (E_OK);
 }
 
 ER s3_calibrate(void)

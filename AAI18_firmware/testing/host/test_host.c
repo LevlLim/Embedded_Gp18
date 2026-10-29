@@ -426,7 +426,7 @@ static void test_barcode_decode(void)
         0x112U, 0x052U, 0x007U, 0x106U, 0x046U, 0x016U, 0x181U,
         0x0C1U, 0x1C0U, 0x091U, 0x190U, 0x0D0U
     };
-    uint16_t widths[S3_FRAME_ELEMENTS] = {0U};
+    s3_bar_width_t widths[S3_FRAME_ELEMENTS] = {0U};
     uint16_t physical[S3_FRAME_ELEMENTS] = {0U};
     uint16_t symbols[3] = {0x094U, 0U, 0x094U};
     s3_barcode_result_t result = {0};

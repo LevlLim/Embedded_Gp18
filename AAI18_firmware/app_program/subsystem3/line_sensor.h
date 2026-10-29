@@ -20,6 +20,11 @@ msg_line_state_t s3_get_line_state(void);
 bool s3_read_line_sensors(uint8_t * p_flags);
 void s3_set_active(bool b_on);
 bool s3_barcode_active(void);
+/* Controller-only startup/reset: apply the fixed profile without waiting.
+ * Does not activate sensing or command movement; START remains the trigger.
+ */
+ER s3_prepare(void);
+/* Optional explicit maintenance sweep; not called by boot or fault reset. */
 ER s3_calibrate(void);
 /* Same ABI/order as the former side/centre getter: GP26, then GP27. */
 void s3_get_thresholds(uint16_t * p_left, uint16_t * p_right);

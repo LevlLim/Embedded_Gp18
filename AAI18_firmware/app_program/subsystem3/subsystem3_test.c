@@ -8,7 +8,7 @@
 #if APP_TEST
 void subsystem3_test(void)
 {
-    uint16_t widths[S3_FRAME_ELEMENTS] = {0U};
+    s3_bar_width_t widths[S3_FRAME_ELEMENTS] = {0U};
     uint16_t const patterns[3] = {0x094U, 0x109U, 0x094U};
     s3_barcode_result_t result = {0};
     msg_barcode_cmd_t direction = MSG_BC_NONE;

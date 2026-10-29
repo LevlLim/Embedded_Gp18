@@ -10,6 +10,9 @@
 
 ER subsystem3_init(void);
 ER subsystem3_start(void);
+#if S3_BARCODE_BENCH
+INT s3_barcode_bench_main(void);
+#endif
 #if APP_TEST
 void subsystem3_test(void);
 #endif

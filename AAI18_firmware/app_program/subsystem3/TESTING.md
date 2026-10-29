@@ -3,7 +3,34 @@
 Buddy 3 owns this folder. Motor commands and mission decisions belong to
 Buddies 2 and 5; this change adds sensing and a junction observation interface.
 
-## Mounting and wiring
+## Stationary hand-scanning UF2
+
+Build with `./Build-Buddy3.ps1 -BarcodeBench` (CMake preset `barcode-bench`).
+This is a separate bench image: GP28 scanning activates automatically, with
+the motors at zero duty and no Motion/Controller/IMU/telemetry tasks started.
+No START press or IR/IMU calibration sweep is required. It still uses the
+fixed GP28 threshold 2047 and full hysteresis band 200.
+
+Open the Pico USB serial port. `[BENCH] READY` identifies this image. Hold
+white under GP28 for 3 seconds, slide the complete *letter* barcode sideways
+across the sensor in a steady 2-8 second pass, then hold white for 3 seconds.
+Move across the bars, not along their height. Keep the paper at the normal
+sensor working distance; a lifted sensor can report no surface. Either scan
+direction is supported. Do not pause or reverse midway through a barcode.
+
+Successful scans print `[S3] barcode A -> left` (and the corresponding result
+for every A-Z letter). A once-per-second `[BENCH] GP28 ADC ...` heartbeat
+reports raw signal/white/black/no-surface status. No turn is executed.
+
+Hand mode accepts 2-1000 ms elements and up to 20 seconds per scan including
+end confirmation; the start/stop patterns, relative widths, white quiet zones,
+sample freshness and invalid-scan rejection are still checked. It uses 32-bit
+microsecond widths only in this mode, avoiding truncation above 65 ms.
+The normal car image keeps its original 16-bit widths and 2-60 ms / 2 s limits.
+Run host tests both normally and with `-BarcodeBench` to test both profiles.
+Flash the normal car UF2 again to restore driving and START/STOP behaviour.
+
+## Driving sensor mounting
 
 Viewed from above, facing forwards:
 
@@ -29,7 +56,7 @@ Keep GP28's VBAT measurement jumper open on the Robo Pico board.
 
 ## Behaviour
 
-The line task runs every 5 ms. After successful calibration and activation:
+The line task runs every 5 ms. After loading fixed settings and activation:
 
 | Left | Right | Error | Meaning |
 | --- | --- | ---: | --- |
@@ -53,12 +80,21 @@ Hysteresis retains each sensor's previous classification near its threshold.
 Both-white cannot prove the presence of a line. Both-black cannot distinguish
 a T, crossing or wide black marking. These are physical sensing limitations.
 
-## Calibrate and test on the car
+## Start and test on the car
 
-1. Build the **Self-test: Buddy 3 only** preset (`test-b3`). During the 3 s boot
-   calibration, sweep EACH of GP26, GP27 and GP28 across black AND white. The
-   calibration requires enough fresh samples and contrast on all three inputs;
-   a partial/failed calibration does not replace any thresholds.
+Boot and fault reset reuse fixed thresholds: GP26=2047, GP27=2047 and GP28=2047,
+with a 200-count full hysteresis band. These are the existing defaults selected
+by the user for reuse, not values inferred from a failed calibration sweep.
+Edit `S3_LEFT_THRESHOLD`, `S3_RIGHT_THRESHOLD` and `S3_BARCODE_THRESHOLD` in
+`buddy3_config.h` if the settings change, then rebuild and flash. No flash
+storage or automatic adaptation is used. Classification switches to black
+above 2147 and white below 1947; within that band it keeps its previous state.
+
+1. Build the **Self-test: Buddy 3 only** preset (`test-b3`) and flash its UF2.
+   Place the car on the track at normal sensor height. No calibration movement
+   is required. Check `[S3] fixed thresholds: ... -- no boot sweep` and
+   `[S5] READY`, then press START (GP20) to drive; STOP is GP21.
+   Power-up alone does not command motion. Other subsystem faults still apply.
 2. Check `[TEST-S3]` output for the new pin roles, truth table, ADC freshness
    and `*A* -> A -> left` decode result. This test sends no motion command.
 3. Test normal line-following at low speed. Aligned: both white, error 0.
@@ -78,7 +114,13 @@ for a confirmed junction (`J0` otherwise, `J?` if observations are unavailable).
 Its B/W labels compare a threshold without hysteresis;
 `s3_read_line_sensors()` reports the actual classification.
 
-The actual car's measured settings are preserved: readings at or above 3950
+The optional `s3_calibrate()` maintenance API still performs the explicit
+three-second sweep, with transactional updates on success. Boot and fault reset
+call `s3_prepare()` instead. Every reset and reboot restores the fixed profile,
+including after a failed maintenance sweep. STOP/START retains the current
+profile. Sweep measurements are not persisted.
+
+The actual car's measured acquisition limits are preserved: readings at or above 3950
 are treated as no surface and excluded from calibration/capture. Either line
 sensor losing its surface invalidates the line reading, rather than treating
 air as black or aligned white. A calibration sweep needs at least 400 ADC
@@ -90,6 +132,8 @@ From PowerShell, run this folder's `tests/Run-HostTests.ps1` (requires host gcc)
 Optional parameters: `-Compiler <gcc-path>` and `-OutputDirectory <path>`.
 It builds with warnings as errors and runs production-code regressions for:
 
+- immediate fixed-profile startup/reset without delays or an ADC sweep;
+- line steering, barcode capture and acquisition failures with fixed settings;
 - all four edge combinations, sustained white, steering sign and zero error;
 - junction debounce, duplicate rejection, clearing, rearming and stop/start;
 - transactional three-channel calibration, ADC failure, stale observations;
@@ -116,7 +160,7 @@ if (s3_read_line_sensors(&flags))
 ```
 
 The call returns false and clears the output for unavailable, inactive,
-uncalibrated or stale input; a null pointer also returns false. A true result
+unprepared or stale input; a null pointer also returns false. A true result
 with zero flags means both white. Flags and timestamp are published together in
 one atomic 32-bit record (three flag bits, one valid bit, 28-bit millisecond
 timestamp). Junction flags use this Buddy 3 API without new shared events.

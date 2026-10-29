@@ -153,6 +153,9 @@ EXPORT uint32_t app_now_ms(void)
 
 EXPORT INT usermain(void)
 {
+#if S3_BARCODE_BENCH
+    return (s3_barcode_bench_main());
+#else
     T_RVER ver;
 #if APP_TEST
     uint32_t wait_ms;
@@ -193,12 +196,9 @@ EXPORT INT usermain(void)
        buddy's (build with TEST_BUDDY=N, or the CMake "test-bN" preset).
        Every subsystem is still initialised and started above, because the
        tests exercise the real tasks. */
-    /* Let the boot calibration (3 s, Vehicle Controller) finish first,
-       so the tests do not run on top of it. */
-    /* Wait for the Controller to finish its boot calibration (READY or
-       FAULT), up to 15 s.  A fixed 4 s wait was not always enough, and
-       the tests then ran on top of the calibration. */
-    tm_printf((UB*)"[TEST] waiting for the boot calibration...\n");
+    /* Wait for the Controller's sensor setup (READY or FAULT), up to 15 s.
+       Fixed thresholds need no sweep; other subsystem tasks still run. */
+    tm_printf((UB*)"[TEST] waiting for sensor setup...\n");
     for (wait_ms = 0u; (wait_ms < 15000u) && !s5_is_initialised();
          wait_ms += 100u)
     {
@@ -241,6 +241,7 @@ EXPORT INT usermain(void)
     (void)tk_slp_tsk(TMO_FEVR);
 
     return (0);
+#endif /* S3_BARCODE_BENCH */
 }
 
 /* end of file */

@@ -8,6 +8,15 @@
 #include "../msg_defs.h"
 #include "buddy3_config.h"
 
+/* The driving build retains compact 16-bit microseconds. The opt-in hand
+ * scanner uses 32 bits to represent slow bars without truncating durations.
+ */
+#if S3_BARCODE_BENCH
+typedef uint32_t s3_bar_width_t;
+#else
+typedef uint16_t s3_bar_width_t;
+#endif
+
 /* Unpacked API view; persistent/queued results occupy 13 bits in 2 bytes. */
 typedef struct
 {
@@ -19,7 +28,7 @@ typedef struct
 } s3_barcode_result_t;
 
 /** Pure bounded decoder. Output is unchanged on failure. */
-bool s3_decode_code39(uint16_t const * p_widths, uint8_t count,
+bool s3_decode_code39(s3_bar_width_t const * p_widths, uint8_t count,
                      uint32_t leading_white_us, uint32_t trailing_white_us,
                      s3_barcode_result_t * p_result);
 

@@ -78,6 +78,16 @@
             "cacheVariables": {
                 "AAI18_TEST_BUDDY": "5"
             }
+        },
+        {
+            "name": "barcode-bench",
+            "displayName": "Stationary GP28 hand scanner (motors disabled)",
+            "inherits": "base",
+            "cacheVariables": {
+                "AAI18_BARCODE_BENCH": "ON",
+                "AAI18_TEST": "OFF",
+                "AAI18_TEST_BUDDY": "0"
+            }
         }
     ],
     "buildPresets": [
@@ -112,6 +122,10 @@
         {
             "name": "test-b5",
             "configurePreset": "test-b5"
+        },
+        {
+            "name": "barcode-bench",
+            "configurePreset": "barcode-bench"
         }
     ]
 }

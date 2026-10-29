@@ -192,11 +192,11 @@ uint8_t adc_sampler_since(uint32_t after, adc_sample_t * p_out,
 }
 
 static void make_frame(uint16_t pattern, bool b_reverse,
-                       uint16_t narrow, uint16_t wide,
-                       uint16_t * p_widths)
+                       s3_bar_width_t narrow, s3_bar_width_t wide,
+                       s3_bar_width_t * p_widths)
 {
     uint16_t patterns[3] = {CODE39_STAR, pattern, CODE39_STAR};
-    uint16_t scratch[S3_FRAME_ELEMENTS] = {0U};
+    s3_bar_width_t scratch[S3_FRAME_ELEMENTS] = {0U};
     uint8_t character = 0U;
     uint8_t element = 0U;
     uint8_t count = 0U;
@@ -237,9 +237,9 @@ static void feed_colour(bool b_dark, uint32_t duration)
 }
 
 static void feed_frame(uint16_t pattern, bool b_reverse,
-                       uint16_t narrow, uint16_t wide)
+                       s3_bar_width_t narrow, s3_bar_width_t wide)
 {
-    uint16_t widths[S3_FRAME_ELEMENTS] = {0U};
+    s3_bar_width_t widths[S3_FRAME_ELEMENTS] = {0U};
     uint8_t index = 0U;
 
     make_frame(pattern, b_reverse, narrow, wide, widths);
@@ -275,7 +275,7 @@ static void run_barcode_once(void)
     g_wait_us = PERIOD_LINE_MS * 1000U;
 }
 
-static void feed_elements(uint16_t const * p_widths)
+static void feed_elements(s3_bar_width_t const * p_widths)
 {
     uint8_t index = 0U;
 
@@ -287,7 +287,7 @@ static void feed_elements(uint16_t const * p_widths)
 
 static void test_capture_boundaries(void)
 {
-    uint16_t widths[S3_FRAME_ELEMENTS] = {0U};
+    s3_bar_width_t widths[S3_FRAME_ELEMENTS] = {0U};
     s3_barcode_result_t result = {0};
     uint16_t saved = 0U;
     uint8_t reverse = 0U;
@@ -342,7 +342,7 @@ static void test_capture_boundaries(void)
 
 static void test_delayed_capture(void)
 {
-    uint16_t widths[S3_FRAME_ELEMENTS] = {0U};
+    s3_bar_width_t widths[S3_FRAME_ELEMENTS] = {0U};
     uint16_t saved = g_latest_result;
 
     /* A pending A with old trailing-white samples must not publish after
@@ -379,7 +379,7 @@ static void test_delayed_capture(void)
 
 static void test_airborne_barcode(void)
 {
-    uint16_t widths[S3_FRAME_ELEMENTS] = {0U};
+    s3_bar_width_t widths[S3_FRAME_ELEMENTS] = {0U};
     uint16_t saved = g_latest_result;
     adc_sample_t sample = {4095U, 0U};
 
@@ -416,7 +416,7 @@ static void test_independent_patterns(void)
 {
     static uint16_t const narrows[3] = {2000U, 4000U, 8000U};
     static uint16_t const wides[3] = {5000U, 10000U, 20000U};
-    uint16_t widths[S3_FRAME_ELEMENTS] = {0U};
+    s3_bar_width_t widths[S3_FRAME_ELEMENTS] = {0U};
     s3_barcode_result_t result = {0};
     uint8_t letter = 0U;
     uint8_t reverse = 0U;
@@ -457,7 +457,7 @@ static void test_independent_patterns(void)
 
 static void test_calibration_reset_and_limits(void)
 {
-    uint16_t widths[S3_FRAME_ELEMENTS] = {0U};
+    s3_bar_width_t widths[S3_FRAME_ELEMENTS] = {0U};
     s3_barcode_result_t result = {0};
     uint16_t saved = g_latest_result;
     uint32_t calibration = g_calibration;
@@ -497,7 +497,7 @@ static void test_calibration_reset_and_limits(void)
     TEST_CHECK(s3_decode_code39(widths, S3_FRAME_ELEMENTS,
                                500000U, 500000U, &result));
     /* The pure API must enforce the same element limit as live capture. */
-    widths[9] = 65000U;
+    widths[9] = (s3_bar_width_t)(S3_MAX_BAR_US + 1000U);
     TEST_CHECK(!s3_decode_code39(widths, S3_FRAME_ELEMENTS,
                                 500000U, 500000U, &result));
     TEST_CHECK('A' == result.letter);
@@ -510,11 +510,79 @@ static void test_calibration_reset_and_limits(void)
                && result.b_reverse && barcode_mapping_direction('B') == result.direction);
 }
 
+#if S3_BARCODE_BENCH
+static void test_hand_scan(void)
+{
+    s3_bar_width_t widths[S3_FRAME_ELEMENTS] = {0U};
+    s3_bar_width_t const narrows[2] = {100000U, 300000U};
+    s3_barcode_result_t result = {0};
+    uint8_t letter = 0U;
+    uint8_t reverse = 0U;
+    uint8_t speed = 0U;
+    uint32_t quiet_us = 0U;
+    uint16_t saved = 0U;
+
+    TEST_CHECK(4U == sizeof(s3_bar_width_t));
+    s3_prepare();
+    s3_set_active(true);
+    for (letter = 0U; letter < S3_LETTER_COUNT; letter++)
+    {
+        for (reverse = 0U; reverse < 2U; reverse++)
+        {
+            for (speed = 0U; speed < 2U; speed++)
+            {
+                make_frame(reference_pattern(g_reference[letter]),
+                    0U != reverse, narrows[speed], 3U * narrows[speed], widths);
+                quiet_us = narrows[speed] * S3_QUIET_NARROW_MULT;
+                TEST_CHECK(s3_decode_code39(widths, S3_FRAME_ELEMENTS,
+                    quiet_us, quiet_us, &result));
+                TEST_CHECK(result.letter == (uint8_t)('A' + letter));
+                saved = g_latest_result;
+                g_capture = 0U;
+                feed_colour(false, quiet_us);
+                feed_elements(widths);
+                feed_colour(false, quiet_us + TEST_SAMPLE_US);
+                TEST_CHECK(saved != g_latest_result);
+                TEST_CHECK(s3_read_barcode(&result));
+                TEST_CHECK(result.letter == (uint8_t)('A' + letter));
+                TEST_CHECK(result.b_reverse == (0U != reverse));
+                TEST_CHECK(result.direction == barcode_mapping_direction(result.letter));
+            }
+        }
+    }
+    /* A pause longer than an element limit cannot become a valid barcode.
+     * Its following valid scan must still recover without rebooting.
+     */
+    saved = g_latest_result;
+    g_capture = 0U;
+    feed_colour(false, 3000000U);
+    feed_colour(true, S3_MAX_BAR_US + TEST_SAMPLE_US);
+    TEST_CHECK(saved == g_latest_result && 0U == g_candidate);
+    g_capture = 0U;
+    make_frame(0x109U, false, 100000U, 300000U, widths);
+    feed_colour(false, 1000000U);
+    feed_elements(widths);
+    feed_colour(false, 1000000U + TEST_SAMPLE_US);
+    TEST_CHECK(s3_read_barcode(&result) && 'A' == result.letter);
+    TEST_CHECK(saved != g_latest_result);
+    /* A whole frame outside the 20 s bound is rejected by pure and live paths. */
+    make_frame(0x109U, false, 400000U, 1000000U, widths);
+    TEST_CHECK(!s3_decode_code39(widths, S3_FRAME_ELEMENTS,
+        4000000U, 4000000U, &result));
+    saved = g_latest_result;
+    g_capture = 0U;
+    feed_colour(false, 4000000U);
+    feed_elements(widths);
+    feed_colour(false, 4000000U + TEST_SAMPLE_US);
+    TEST_CHECK(saved == g_latest_result);
+}
+#endif
+
 static void test_alphabet(void)
 {
     uint8_t letter = 0U;
     uint8_t reverse = 0U;
-    uint16_t widths[S3_FRAME_ELEMENTS] = {0U};
+    s3_bar_width_t widths[S3_FRAME_ELEMENTS] = {0U};
     s3_barcode_result_t result = {0};
     msg_barcode_t command = {0};
 
@@ -554,7 +622,7 @@ static void test_alphabet(void)
 
 static void test_invalid_and_queues(void)
 {
-    uint16_t widths[S3_FRAME_ELEMENTS] = {0U};
+    s3_bar_width_t widths[S3_FRAME_ELEMENTS] = {0U};
     uint16_t saved = g_latest_result;
     uint8_t index = 0U;
     s3_barcode_result_t result = {0};
@@ -567,7 +635,7 @@ static void test_invalid_and_queues(void)
     TEST_CHECK(!s3_decode_code39(widths, 29U, 80000U, 0U, &result));
     for (index = 0U; index < S3_FRAME_ELEMENTS; index++)
     {
-        uint16_t original = widths[index];
+        s3_bar_width_t original = widths[index];
         widths[index] = 0U;
         TEST_CHECK(!s3_decode_code39(widths, 29U, 80000U, 80000U, &result));
         widths[index] = original;
@@ -601,6 +669,77 @@ static void test_invalid_and_queues(void)
     s3_set_active(true);
     TEST_CHECK(saved == g_latest_result);
     TEST_CHECK(0U == g_queue_count);
+}
+
+static void test_fixed_startup(void)
+{
+    uint32_t before_us = g_now_us;
+    uint32_t before_delays = g_delay_count;
+    uint16_t left = 0U;
+    uint16_t right = 0U;
+    uint8_t flags = 0U;
+    msg_line_t line = {0};
+
+    /* Boot may be stationary on white: readiness must not depend on a sweep.
+     * Even unavailable ADC samples cannot introduce a setup delay. Runtime
+     * acquisition checks still reject unavailable/stale/airborne readings.
+     */
+    g_control = 0U;
+    g_mode = 3U;
+    TEST_CHECK(E_OK == s3_prepare());
+    TEST_CHECK(before_us == g_now_us && before_delays == g_delay_count);
+    TEST_CHECK(!s3_barcode_active());
+    TEST_CHECK(!s3_read_line_sensors(&flags));
+    s3_get_thresholds(&left, &right);
+    TEST_CHECK(2047U == left && 2047U == right);
+    TEST_CHECK((2047U | (200U << 12U)) == g_calibration);
+    TEST_CHECK((2047U | (200U << 12U)) == g_left_cal);
+    TEST_CHECK((2047U | (200U << 12U)) == g_right_cal);
+    s3_set_active(true);
+    run_line_once();
+    TEST_CHECK(MSG_LINE_LOST == s3_get_line_state());
+    TEST_CHECK(!s3_read_line_sensors(&flags));
+    g_mode = 0U;
+    g_values[0] = 100U;
+    g_values[1] = 100U;
+    run_line_once();
+    TEST_CHECK(s3_read_line_sensors(&flags) && 0U == flags);
+    msg_unpack_line(g_line_word, &line);
+    TEST_CHECK(line.b_valid && 0 == line.error);
+    g_values[0] = 3000U;
+    run_line_once();
+    msg_unpack_line(g_line_word, &line);
+    TEST_CHECK(line.b_valid && -S3_LINE_CORRECTION == line.error);
+    g_values[0] = 100U;
+    g_values[1] = 3000U;
+    run_line_once();
+    msg_unpack_line(g_line_word, &line);
+    TEST_CHECK(line.b_valid && S3_LINE_CORRECTION == line.error);
+    g_values[1] = 4095U;
+    run_line_once();
+    TEST_CHECK(!s3_read_line_sensors(&flags));
+    g_values[1] = 100U;
+    feed_frame(0x109U, false,
+               TEST_NARROW_US, TEST_WIDE_US);
+    TEST_CHECK(0U != g_latest_result);
+    /* Reapplying settings on reset preserves the retained barcode and
+     * cannot activate the car. Stop/start leaves the fixed profile intact.
+     */
+    s3_set_active(false);
+    before_us = g_now_us;
+    before_delays = g_delay_count;
+    TEST_CHECK(E_OK == s3_prepare());
+    TEST_CHECK(before_us == g_now_us && before_delays == g_delay_count);
+    TEST_CHECK(!s3_barcode_active());
+    TEST_CHECK(0U != g_latest_result);
+    TEST_CHECK(!s3_read_line_sensors(&flags));
+    s3_set_active(true);
+    TEST_CHECK(s3_barcode_active());
+    run_line_once();
+    TEST_CHECK(s3_read_line_sensors(&flags) && 0U == flags);
+    s3_set_active(false);
+    g_queue_count = 0U;
+    g_latest_result = 0U; /* Restore the cold-boot precondition for alphabet tests. */
 }
 
 static void test_calibration_and_line(void)
@@ -803,6 +942,7 @@ int main(void)
     TEST_CHECK(E_OK == s3_barcode_init());
     TEST_CHECK(3U == g_create_calls);
     TEST_CHECK(E_OK == s3_barcode_init() && 3U == g_create_calls);
+    test_fixed_startup();
     test_alphabet();
     test_invalid_and_queues();
     test_capture_boundaries();
@@ -811,6 +951,9 @@ int main(void)
     test_independent_patterns();
     test_calibration_reset_and_limits();
     test_calibration_and_line();
+#if S3_BARCODE_BENCH
+    test_hand_scan();
+#endif
     printf("Buddy 3 regressions: %u/%u passed\n", g_tests - g_failed, g_tests);
     return ((0U == g_failed) ? 0 : 1);
 }

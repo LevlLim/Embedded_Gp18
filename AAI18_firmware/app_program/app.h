@@ -122,7 +122,8 @@
  * --------------------------------------------------------------------- */
 #define PROV_D_DETECT_CM    (30u)   /* FR6  obstacle detection distance  */
 #define PROV_D_STOP_CM      (20u)   /* NFR2 hard stop distance           */
-#define PROV_CRUISE_PCT     (40u)   /* nominal cruising speed, % duty    */
+// #define PROV_CRUISE_PCT     (40u)   /* nominal cruising speed, % duty    */
+#define PROV_CRUISE_PCT     (20u)   /* nominal cruising speed, % duty    */
 #define PROV_DEGRADE_PCT    (30u)   /* speed cap when a DEGRADE fault is */
                                     /* active (e.g. IMU_FAULT)           */
 

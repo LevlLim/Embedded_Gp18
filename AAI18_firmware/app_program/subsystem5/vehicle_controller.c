@@ -53,7 +53,7 @@ static ID h_flg_events = (ID)0;
 static volatile uint8_t mission = 0u;
 
 static uint8_t  cmd_seq         = 0u;
-static bool     b_cal_ok        = false;
+static bool     b_sensors_ok        = false;
 static uint8_t  start_history   = 0xFFu;   /* 1 = released (active low) */
 static uint8_t  stop_history    = 0xFFu;
 
@@ -469,13 +469,12 @@ static void do_reset(void)
     fault_clear((uint16_t)(FAULT_MASK_ALL & ~(uint32_t)FAULT_WIFI_LOSS));
     s4_request_reset();
 
-    if (!b_cal_ok)
-    {
-        b_cal_ok = (E_OK == s3_calibrate());
-    }
+    /* Reset always restores the fixed profile, including after an optional
+       maintenance sweep. There is no calibration delay to retry. */
+    b_sensors_ok = (E_OK == s3_prepare());
 
-    enter_halted(b_cal_ok ? S5_PARENT_READY : S5_PARENT_FAULT);
-    APP_LOG((UB*)"[S5] RESET -> %s\n", b_cal_ok ? "READY" : "FAULT");
+    enter_halted(b_sensors_ok ? S5_PARENT_READY : S5_PARENT_FAULT);
+    APP_LOG((UB*)"[S5] RESET -> %s\n", b_sensors_ok ? "READY" : "FAULT");
 }
 
 static void do_start(void)
@@ -600,9 +599,9 @@ EXPORT void controller_task(INT stacd, void *p_exinf)
     (void)stacd;
     (void)p_exinf;
 
-    /* ---- INIT: self-test, then READY or FAULT ---- */
-    b_cal_ok = (E_OK == s3_calibrate());
-    if (b_cal_ok)
+    /* ---- INIT: load fixed sensor settings, then READY or FAULT ---- */
+    b_sensors_ok = (E_OK == s3_prepare());
+    if (b_sensors_ok)
     {
         enter_halted(S5_PARENT_READY);
         APP_LOG((UB*)"[S5] READY -- press START or publish a command\n");
@@ -610,7 +609,7 @@ EXPORT void controller_task(INT stacd, void *p_exinf)
     else
     {
         enter_halted(S5_PARENT_FAULT);
-        APP_LOG((UB*)"[S5] self-test failed: press START to retry\n");
+        APP_LOG((UB*)"[S5] sensor setup failed: press START to retry\n");
     }
 
     for (;;)

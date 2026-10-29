@@ -1,4 +1,5 @@
 param(
+    [switch]$BarcodeBench,
     [string]$Compiler = 'gcc',
     [string]$OutputDirectory = (Join-Path $PSScriptRoot 'host-output')
 )
@@ -12,8 +13,12 @@ $flags = @('-std=c11', '-Wall', '-Wextra', '-Wconversion',
     '-Wsign-conversion', '-Wshadow', '-Wpointer-arith', '-Wcast-qual',
     '-Wstrict-prototypes', '-Werror', '-O1', '-g', '-I', $stubRoot,
     '-I', $appRoot)
+if ($BarcodeBench) { $flags += '-DS3_BARCODE_BENCH=1' }
 
 $suites = @(
+    @{ Name = 'test_controller_startup'; Sources = @(
+        (Join-Path $PSScriptRoot 'test_controller_startup.c'),
+        (Join-Path $appRoot 'msg_defs.c')) },
     @{ Name = 'test_buddy3'; Sources = @(
         (Join-Path $PSScriptRoot 'test_buddy3.c'),
         (Join-Path $appRoot 'subsystem3/barcode_mapping.c'),
@@ -28,6 +33,11 @@ $suites = @(
         (Join-Path $PSScriptRoot 'test_telemetry.c'),
         (Join-Path $appRoot 'msg_defs.c')) }
 )
+
+if ($BarcodeBench) {
+    $suites += @{ Name = 'test_barcode_bench'; Sources = @(
+        (Join-Path $PSScriptRoot 'test_barcode_bench.c')) }
+}
 
 foreach ($suite in $suites) {
     $executable = Join-Path $outputRoot ($suite.Name + '.exe')
