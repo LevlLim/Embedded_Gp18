@@ -77,6 +77,11 @@ ER pwm_set_enabled(UINT no, BOOL enable)
 ER pwm_set_pin(UINT no) { (void)no; return (E_OBJ); }
 ER pwm_set_wrap(UINT no, UW wrap) { (void)no; (void)wrap; return (E_OBJ); }
 int32_t s2_get_distance_mm(void) { return (0); }
+void s2_get_speeds(int32_t *p_left, int32_t *p_right)
+{
+    *p_left  = 0;
+    *p_right = 0;
+}
 s2_state_t s2_get_state(void) { return (M_IDLE); }
 bool s3_barcode_active(void) { return (false); }
 bool s5_is_running(void) { return (false); }

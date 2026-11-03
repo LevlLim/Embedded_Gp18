@@ -44,20 +44,31 @@ typedef enum
  */
 
 /* ---------------------------------------------------------------------
- * Encoder geometry.  PROVISIONAL -- counts per revolution has never been
- * stated (risk R8) and the wheel diameter is nominal.  Both must be
- * measured before any distance or turn figure is trusted.
+ * Encoder geometry.  Counts per wheel revolution MEASURED on the car
+ * (5 turns by hand): left 6300 -> 1260, right 3880 -> 776.  The two
+ * differ consistently (different gearbox / encoder per side), so each
+ * wheel has its own value.  (Was a guessed 20 for both: every distance
+ * and turn came out 40-60 times too small.)  Wheel diameter and track
+ * width are still nominal -- measure them.
  * --------------------------------------------------------------------- */
-#define S2_COUNTS_PER_REV       (20)    /* PROVISIONAL: measure this      */
+/* Driving calibration.  By hand (5 turns): L 1260, R 776.  Driving
+   "fwd 500" with both wheels held in step by these counts still curved
+   right -- 190 mm right, 410 mm forward: a ~537 mm radius arc of ~50
+   deg, i.e. the left wheel covered ~520 mm and the right ~413 mm.  Each
+   value is scaled so its wheel covers the commanded distance:
+   1260 x 520/500 = 1311, 776 x 413/500 = 640.  Re-run "fwd" and scale
+   again the same way if it still curves. */
+#define S2_COUNTS_PER_REV_L     (1165)  /* calibrated driving             */
+#define S2_COUNTS_PER_REV_R     (975)   /* calibrated driving             */
 #define S2_WHEEL_DIAM_MM        (65)    /* PROVISIONAL: measure this      */
-#define S2_TRACK_WIDTH_MM       (140)   /* PROVISIONAL: wheel separation  */
+#define S2_TRACK_WIDTH_MM       (124)   /* calibrated: 4x90 = 325 at 112  */
 
 /* PID gains, in 1/256 fixed point.  Integer maths only: the Cortex-M0+ has
    no FPU and Barr-C 5.4a asks that floating point be avoided where fixed
    point will do.  PROVISIONAL -- to be tuned on the bench (A3). */
 #define S2_KP_Q8                (120)
-#define S2_KI_Q8                (3)     /* was 12: wound up to a 187%    */
-#define S2_KD_Q8                (40)    /* correction and spun the car   */
+#define S2_KI_Q8                (0)     /* was 12: wound up to a 187%    */
+#define S2_KD_Q8                (15)    /* correction and spun the car   */
 #define S2_INTEGRAL_LIMIT       (1500)  /* caps I at ~18% duty           */
 
 /* SMOOTHING (bench feedback: the car moved in jerks).
@@ -72,7 +83,16 @@ typedef enum
 
 /* Spin turns (line search, barcode, bypass) run at no more than this, so
    the car can stop on the line instead of sweeping past it. */
-#define S2_TURN_DUTY_PCT        (32u)   /* 25 could not pivot the car */
+#define S2_TURN_DUTY_PCT        (34u)   /* 25 could not pivot the car    */
+
+/* Measured moves keep both wheels in step (drive_balanced() in
+   task_motion.c): duty is moved from the wheel that is ahead (per mille of
+   its own target) to the one behind, proportional + integral, at most
+   half the move duty. */
+#define S2_MOVE_BALANCE_DIV     (8)     /* P: 8 per mille -> 1 % duty    */
+#define S2_MOVE_BALANCE_I_DIV   (160)    /* I: sum / 80 -> % duty         */
+#define S2_MIN_RUN_DUTY_PCT     (34u)   /* below this a wheel stalls     */
+#define S2_INNER_REVERSE_MAX_PCT (0)
 
 /* Stall detection: drive commanded above this duty with no encoder edge
    for this long means the wheel is not turning. */

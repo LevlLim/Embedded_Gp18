@@ -256,7 +256,14 @@ EXPORT int32_t motor_pid_step(int32_t setpoint, int32_t measured,
     return (output);
 }
 
-EXPORT int32_t motor_counts_to_mm(int32_t counts)
+/* Counts per wheel revolution for one wheel. */
+static int32_t counts_per_rev(bool b_left_wheel)
+{
+    return (b_left_wheel ? (int32_t)S2_COUNTS_PER_REV_L
+                         : (int32_t)S2_COUNTS_PER_REV_R);
+}
+
+EXPORT int32_t motor_counts_to_mm(int32_t counts, bool b_left_wheel)
 {
     /*
      * Circumference = pi * diameter.  355/113 approximates pi to seven
@@ -264,10 +271,10 @@ EXPORT int32_t motor_counts_to_mm(int32_t counts)
      */
     int32_t circumference_mm = (S2_WHEEL_DIAM_MM * 355) / 113;
 
-    return ((counts * circumference_mm) / S2_COUNTS_PER_REV);
+    return ((counts * circumference_mm) / counts_per_rev(b_left_wheel));
 }
 
-EXPORT int32_t motor_mm_to_counts(int32_t millimetres)
+EXPORT int32_t motor_mm_to_counts(int32_t millimetres, bool b_left_wheel)
 {
     int32_t circumference_mm = (S2_WHEEL_DIAM_MM * 355) / 113;
 
@@ -276,10 +283,10 @@ EXPORT int32_t motor_mm_to_counts(int32_t millimetres)
         return (0);
     }
 
-    return ((millimetres * S2_COUNTS_PER_REV) / circumference_mm);
+    return ((millimetres * counts_per_rev(b_left_wheel)) / circumference_mm);
 }
 
-EXPORT int32_t motor_degrees_to_counts(int32_t degrees)
+EXPORT int32_t motor_degrees_to_counts(int32_t degrees, bool b_left_wheel)
 {
     /*
      * A spin turn moves each wheel along an arc of the track circle.
@@ -287,7 +294,7 @@ EXPORT int32_t motor_degrees_to_counts(int32_t degrees)
      */
     int32_t arc_mm = (((S2_TRACK_WIDTH_MM * 355) / 113) * degrees) / 360;
 
-    return (motor_mm_to_counts(arc_mm));
+    return (motor_mm_to_counts(arc_mm, b_left_wheel));
 }
 
 /* end of file */

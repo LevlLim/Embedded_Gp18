@@ -23,6 +23,11 @@
  *   4 turn back 90         5 forward toward the line, watching for it
  *   line found during 4/5 -> 6 turn toward S 90 (realign) -> line follow
  * The forward D_stop guard is on only during the forward legs.
+ *
+ * JUNCTIONS: a barcode does not turn the car at once.  Its command is
+ * stored and carried out at the NEXT junction (both line sensors black):
+ *   LEFT / RIGHT / U-TURN -> forward S5_SENSOR_TO_AXLE_MM, then turn
+ *   STRAIGHT or none      -> carry on following the line
  */
 
 #include "subsystem5.h"
@@ -37,7 +42,6 @@
 #define VC_LEG_ALIGN            (6u)
 #define VC_LEG_NONE             (0xFFu)
 #define VC_SEARCH_STEP_DEG      (20u)
-#define VC_BARCODE_FORWARD_MM   (200u)
 #define VC_MIN_CONFIDENCE       (4u)
 #define VC_LOST_GRACE_MS        (150u)  /* settle after a manoeuvre      */
 #define VC_LOST_SEARCH_MS       (600u)  /* lost this long before search: */
@@ -67,7 +71,12 @@ static uint32_t follow_since_ms = 0u;
 static uint32_t lost_since_ms   = 0u;
 static bool     b_was_lost      = false;
 static uint8_t  search_step     = 0u;
+static volatile uint8_t  manual_type = 0u;    /* written by Telemetry */
+static volatile uint16_t manual_arg  = 0u;
 static bool     b_search_right  = false;   /* first turn toward the line */
+static uint8_t  pending_turn    = (uint8_t)MSG_BC_NONE; /* for next junction */
+static uint8_t  junction_step   = 0u;      /* 1 = to the axle, 2 = turning */
+static volatile uint8_t injected_turn = 0u;  /* written by Telemetry */
 
 /* ---------------------------------------------------------------------
  * Mission state (one byte)
@@ -118,7 +127,8 @@ static void send(msg_cmd_type_t type, uint32_t arg)
 
 static void enter_line_follow(void)
 {
-    bypass_leg = VC_LEG_NONE;
+    bypass_leg    = VC_LEG_NONE;
+    junction_step = 0u;
     s5_obstacle_guard(false);
     s5_obstacle_request(S5_REQ_RESUME);
     set_mission(S5_PARENT_RUNNING, S5_SUB_LINE_FOLLOW);
@@ -133,12 +143,20 @@ static void enter_running(void)
     s3_set_active(true);
     s4_set_active(true);
     avoid_retries = 0u;
+    pending_turn  = (uint8_t)MSG_BC_NONE;
+    junction_step = 0u;
+    s3_force_straight(false);
     enter_line_follow();
     APP_LOG((UB*)"[S5] RUNNING\n");
 }
 
 static void enter_halted(s5_parent_t parent)
 {
+    /* Stop Motion Control too.  An E-STOP brakes it anyway, but RESET
+       sent while RUNNING sets no stop bit: Motion stayed in line
+       following with the sensors switched off, read "line lost" and
+       pivoted left for ever (duty L 0 R 32, err 0 --). */
+    send(MSG_CMD_STOP, 0u);
     s2_set_stop_on_line(false);
     s3_set_active(false);
     s4_set_active(false);
@@ -193,6 +211,9 @@ static void run_leg(uint8_t leg)
     bypass_leg = leg;
     s5_obstacle_guard((1u == leg) || (3u == leg) || (5u == leg));
 
+    APP_LOG((UB*)"[S5] bypass leg %d (%s side)\n", (INT)leg,
+            (MSG_SIDE_LEFT == obstacle.side) ? "left" : "right");
+
     switch (leg)
     {
         case 0u:
@@ -236,6 +257,13 @@ static void handle_profile(void)
         return;
     }
 
+    APP_LOG((UB*)"[S5] profile: %d cm at %d deg, width %d cm, clear "
+                 "L %d R %d cm -> %s\n", (INT)obstacle.distance_cm,
+            (INT)obstacle.bearing_deg, (INT)obstacle.width_cm,
+            (INT)obstacle.clear_left_cm, (INT)obstacle.clear_right_cm,
+            (MSG_SIDE_LEFT == obstacle.side) ? "LEFT"
+            : ((MSG_SIDE_RIGHT == obstacle.side) ? "RIGHT" : "NONE"));
+
     if (0u == obstacle.distance_cm)
     {
         /* False alarm: nothing confirmed by the fine scan. */
@@ -262,6 +290,8 @@ static void handle_profile(void)
         /* Neither side fits: back off and look again (REVERSE_RETRY). */
         avoid_retries = (uint8_t)(avoid_retries + 1u);
         bypass_leg    = VC_LEG_NONE;
+        APP_LOG((UB*)"[S5] no side fits: back off and rescan (%d)\n",
+                (INT)avoid_retries);
         send(MSG_CMD_REVERSE, S5_REVERSE_MM);
     }
     else
@@ -281,8 +311,27 @@ static void handle_move_done(void)
 {
     s5_sub_t sub = get_sub();
 
-    if (S5_SUB_BARCODE_ACTION == sub)
+    if ((S5_SUB_BARCODE_ACTION == sub) && (1u == junction_step))
     {
+        /* At the junction centre: now turn. */
+        junction_step = 2u;
+        if (MSG_BC_LEFT == pending_turn)
+        {
+            send(MSG_CMD_TURN_L, 90u);
+        }
+        else if (MSG_BC_RIGHT == pending_turn)
+        {
+            send(MSG_CMD_TURN_R, 90u);
+        }
+        else
+        {
+            send(MSG_CMD_U_TURN, 180u);
+        }
+        pending_turn = (uint8_t)MSG_BC_NONE;
+    }
+    else if (S5_SUB_BARCODE_ACTION == sub)
+    {
+        junction_step = 0u;
         enter_line_follow();
     }
     else if (S5_SUB_OBSTACLE_AVOID == sub)
@@ -325,8 +374,44 @@ static void handle_move_done(void)
     }
 }
 
+/* Name of a barcode command, for the console. */
+static const char *turn_name(uint8_t cmd)
+{
+    const char *p_name = "straight on";
+
+    if (MSG_BC_LEFT == cmd)
+    {
+        p_name = "turn LEFT";
+    }
+    else if (MSG_BC_RIGHT == cmd)
+    {
+        p_name = "turn RIGHT";
+    }
+    else if (MSG_BC_U_TURN == cmd)
+    {
+        p_name = "U-TURN";
+    }
+    else
+    {
+        /* STRAIGHT or none. */
+    }
+
+    return (p_name);
+}
+
+/* Keep a junction command for the next junction; a newer one replaces
+   it.  STRAIGHT also tells the line sensor not to treat that junction as a
+   corner. */
+static void store_turn(uint8_t cmd, const char *p_from)
+{
+    pending_turn = cmd;
+    s3_force_straight(MSG_BC_STRAIGHT == cmd);
+    APP_LOG((UB*)"[S5] %s %s: will be done at the next junction\n",
+            p_from, turn_name(pending_turn));
+}
+
 /*
- * Act on a decoded barcode, in line following only.  A low-confidence
+ * Store a decoded barcode for the next junction.  A low-confidence
  * decode is ignored: a missed command is recoverable, a wrong turn is not.
  */
 static void handle_barcode(void)
@@ -342,31 +427,43 @@ static void handle_barcode(void)
                   (bc.confidence >= VC_MIN_CONFIDENCE) ? "" : " (ignored)");
     }
 
-    if (b_got && (S5_SUB_LINE_FOLLOW == get_sub())
-        && (bc.confidence >= VC_MIN_CONFIDENCE))
+    if (b_got && (bc.confidence >= VC_MIN_CONFIDENCE)
+        && (MSG_BC_INVALID != bc.cmd) && (MSG_BC_NONE != bc.cmd))
     {
-        set_mission(S5_PARENT_RUNNING, S5_SUB_BARCODE_ACTION);
+        store_turn((uint8_t)bc.cmd, "barcode");
+    }
+}
 
-        if (MSG_BC_STRAIGHT == bc.cmd)
-        {
-            send(MSG_CMD_FORWARD, VC_BARCODE_FORWARD_MM);
-        }
-        else if (MSG_BC_LEFT == bc.cmd)
-        {
-            send(MSG_CMD_TURN_L, 90u);
-        }
-        else if (MSG_BC_RIGHT == bc.cmd)
-        {
-            send(MSG_CMD_TURN_R, 90u);
-        }
-        else if (MSG_BC_U_TURN == bc.cmd)
-        {
-            send(MSG_CMD_U_TURN, 180u);
-        }
-        else
-        {
-            set_mission(S5_PARENT_RUNNING, S5_SUB_LINE_FOLLOW);
-        }
+/* A test turn from MQTT (jleft, jright, ...): same as a barcode. */
+static void handle_test_turn(void)
+{
+    store_turn(injected_turn, "test");
+}
+
+/*
+ * Both line sensors black: a junction.  Carry out the stored barcode.
+ */
+static void handle_junction(void)
+{
+    if (S5_SUB_LINE_FOLLOW != get_sub())
+    {
+        /* Mid-manoeuvre (a junction turn crosses the lines): ignore. */
+    }
+    else if ((MSG_BC_LEFT == pending_turn) || (MSG_BC_RIGHT == pending_turn)
+             || (MSG_BC_U_TURN == pending_turn))
+    {
+        APP_LOG((UB*)"[S5] junction %d: %s\n",
+                (INT)s3_get_junction_count(), turn_name(pending_turn));
+        set_mission(S5_PARENT_RUNNING, S5_SUB_BARCODE_ACTION);
+        junction_step = 1u;
+        send(MSG_CMD_FORWARD, S5_SENSOR_TO_AXLE_MM);
+    }
+    else
+    {
+        /* STRAIGHT or nothing stored: keep following the line. */
+        APP_LOG((UB*)"[S5] junction %d: %s\n",
+                (INT)s3_get_junction_count(), turn_name(pending_turn));
+        pending_turn = (uint8_t)MSG_BC_NONE;
     }
 }
 
@@ -392,7 +489,7 @@ static void poll_running(void)
     {
         enter_search();
     }
-    else if ((S5_SUB_OBSTACLE_AVOID == sub) && b_on_line
+    else if ((S5_SUB_OBSTACLE_AVOID == sub) && s3_line_seen()
              && ((4u == bypass_leg) || (5u == bypass_leg)))
     {
         run_leg(VC_LEG_ALIGN);          /* back on the line: realign */
@@ -522,6 +619,20 @@ static void handle_events(uint32_t events)
 {
     s5_parent_t parent = get_parent();
 
+    if (0u != (events & S5_EVT_MANUAL))
+    {
+        if ((S5_PARENT_READY == parent) || (S5_PARENT_STOPPED == parent))
+        {
+            APP_LOG((UB*)"[S5] manual move: type %d, %d\n",
+                    (INT)manual_type, (INT)manual_arg);
+            send((msg_cmd_type_t)manual_type, (uint32_t)manual_arg);
+        }
+        else
+        {
+            APP_LOG((UB*)"[S5] manual move ignored: park the car first\n");
+        }
+    }
+
     if (0u != (events & S5_EVT_RESET))
     {
         do_reset();
@@ -550,6 +661,14 @@ static void handle_events(uint32_t events)
         if (0u != (events & S5_EVT_BARCODE))
         {
             handle_barcode();
+        }
+        if (0u != (events & S5_EVT_JUNCTION))
+        {
+            handle_junction();
+        }
+        if (0u != (events & S5_EVT_TEST_TURN))
+        {
+            handle_test_turn();
         }
         if (0u != (events & S5_EVT_MOVE_DONE))
         {
@@ -613,6 +732,15 @@ EXPORT void controller_task(INT stacd, void *p_exinf)
         APP_LOG((UB*)"[S5] self-test failed: press START to retry\n");
     }
 
+    /* One summary line ~3 s after power-up.  The IMU's own [S4] lines
+       come in the first half second, usually before the serial monitor
+       has reconnected, so they are easy to miss. */
+    APP_LOG((UB*)"[S5] boot summary: line calibration %s, IMU %s\n",
+            b_cal_ok ? "OK" : "FAILED (line not between the sensors?)",
+            (S4_IMU_FAULT == s4_get_state()) ? "FAULT (see [S4] lines)"
+            : ((S4_INIT_CAL == s4_get_state()) ? "still calibrating"
+               : "calibrated"));
+
     for (;;)
     {
         /* Single consumer of flg_events, so clear-on-wait is correct here
@@ -633,6 +761,19 @@ EXPORT void controller_task(INT stacd, void *p_exinf)
             poll_running();
         }
     }
+}
+
+EXPORT void s5_manual_move(msg_cmd_type_t type, uint32_t arg)
+{
+    manual_type = (uint8_t)type;
+    manual_arg  = msg_sat_u16(arg, (uint16_t)MSG_MAX_CMD_ARG, NULL);
+    s5_post_event(S5_EVT_MANUAL);
+}
+
+EXPORT void s5_inject_turn(uint8_t cmd)
+{
+    injected_turn = cmd;
+    s5_post_event(S5_EVT_TEST_TURN);
 }
 
 EXPORT void s5_post_event(uint32_t event_bits)

@@ -47,7 +47,7 @@ Flash `mtk3pico_smp1_usb_cdc_wifi_test_b2.uf2` and open the serial monitor. The 
 
 | Line | Pass when |
 |---|---|
-| `100 mm = N counts, 90 deg = N counts` | the numbers look sensible for your wheels (see `S2_COUNTS_PER_REV`, `S2_WHEEL_DIAM_MM`) |
+| `100 mm = N counts, 90 deg = N counts` | the numbers look sensible for your wheels (see `S2_COUNTS_PER_REV_L/_R`, `S2_WHEEL_DIAM_MM`) |
 | `PASS: left encoder +N counts forward` / `right` | both wheels count UP while driving forward. `counts BACKWARDS` means swap that encoder's A/B wires; `no edges` means wiring or motor power. |
 | `e-stop software path = N ms` | N ≤ 100 (FR11). This is software only: the logic-analyser capture (T5) is still owed. |
 | `max IO_BANK0 dispatcher = N us` | a few µs (risk R8) |
@@ -56,7 +56,7 @@ Flash `mtk3pico_smp1_usb_cdc_wifi_test_b2.uf2` and open the serial monitor. The 
 
 These need the real track or instruments, so the self-test cannot do them:
 
-- **Measure and set the PROVISIONAL geometry** in `subsystem2.h`: `S2_COUNTS_PER_REV` (turn a wheel exactly once by hand, read the count), `S2_WHEEL_DIAM_MM`, `S2_TRACK_WIDTH_MM`. Turns and distances depend on them.
+- **Measure and set the PROVISIONAL geometry** in `subsystem2.h`: `S2_COUNTS_PER_REV_L` / `_R` (measured: 1260 / 776 -- turn each wheel 5 times by hand and read the `enc` numbers on the `[DBG]` line), `S2_WHEEL_DIAM_MM`, `S2_TRACK_WIDTH_MM`. Turns and distances depend on them.
 - **Check a measured move:** send FORWARD 500 mm (or REVERSE / TURN 90°) and measure what the car actually does.
 - **Tune line following** on the real track with `S2_KP_Q8`, `S2_KD_Q8`, `S2_KI_Q8`, `S2_SLEW_PCT`, `S2_TURN_DUTY_PCT` and `PROV_CRUISE_PCT` (in `app.h`).
 - **T5:** logic analyser on GP8–GP11, trigger a fault, measure to both pins LOW.

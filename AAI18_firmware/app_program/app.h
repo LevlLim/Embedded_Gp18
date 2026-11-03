@@ -64,6 +64,14 @@
 #define PIN_ENC_L_B         (3u)    /* S2  left encoder phase B          */
 #define PIN_ENC_R_A         (4u)    /* S2  right encoder phase A (IRQ)   */
 #define PIN_ENC_R_B         (5u)    /* S2  right encoder phase B         */
+
+/* ENCODER DIRECTION.  Measured on the car: driving forward, the left
+   count rises but the right count FALLS (the right motor is mounted
+   mirror-image, so its encoder turns the other way).  1 = flip that
+   wheel's count so forward is positive on both.  The alternative is to
+   swap the encoder's A/B wires (GP4/GP5) and set this to 0. */
+#define ENC_LEFT_REVERSED   (0)
+#define ENC_RIGHT_REVERSED  (1)
 #define PIN_US_TRIG         (0u)    /* S5  HC-SR04P trigger              */
 #define PIN_US_ECHO         (1u)    /* S5  HC-SR04P echo         (IRQ)   */
 #define PIN_MOTOR_L_A       (8u)    /* S2  PWM slice 4 channel A         */
@@ -122,8 +130,8 @@
  * --------------------------------------------------------------------- */
 #define PROV_D_DETECT_CM    (30u)   /* FR6  obstacle detection distance  */
 #define PROV_D_STOP_CM      (20u)   /* NFR2 hard stop distance           */
-#define PROV_CRUISE_PCT     (40u)   /* nominal cruising speed, % duty    */
-#define PROV_DEGRADE_PCT    (30u)   /* speed cap when a DEGRADE fault is */
+#define PROV_CRUISE_PCT     (24u)   /* nominal cruising speed, % duty    */
+#define PROV_DEGRADE_PCT    (24u)   /* speed cap when a DEGRADE fault is */
                                     /* active (e.g. IMU_FAULT)           */
 
 /* ---------------------------------------------------------------------
@@ -181,12 +189,13 @@ IMPORT ER subsystem4_start(void);
 IMPORT ER subsystem5_start(void);
 
 /* Which buddy's self-test a TEST build runs: 0 = all, 1..5 = that buddy
-   only.  Set by the build (TEST_BUDDY=N / AAI18_TEST_BUDDY). */
+   only, 6 = the ultrasonic bench test alone (prints the sensor
+   forever).  Set by the build (TEST_BUDDY=N / AAI18_TEST_BUDDY). */
 #ifndef APP_TEST_BUDDY
 #define APP_TEST_BUDDY  (0)
 #endif
-#if (APP_TEST_BUDDY < 0) || (APP_TEST_BUDDY > 5)
-#error "APP_TEST_BUDDY must be 0 (all) or 1..5"
+#if (APP_TEST_BUDDY < 0) || (APP_TEST_BUDDY > 6)
+#error "APP_TEST_BUDDY must be 0 (all), 1..5, or 6 (ultrasonic bench)"
 #endif
 
 #if APP_TEST
@@ -208,7 +217,7 @@ IMPORT void subsystem5_test(void);
  *  A macro (Barr-C deviation D5, as CHECK below) because the template's
  *  printf has no va_list form to forward the arguments to.
  * --------------------------------------------------------------------- */
-#define APP_LOG_MAX     (120u)
+#define APP_LOG_MAX     (160u)
 
 IMPORT void app_log_line(const UB *p_text);     /* subsystem1 */
 

@@ -53,6 +53,9 @@ Car on the desk, nothing within 40 cm in front.
 | `PASS: WIFI_LOSS does not stop the car`, `PASS: COLLISION reads as E-STOP` | fault severities |
 | `MOVE A HAND FROM ~40 cm TO ~10 cm IN FRONT (6 s)` | move your hand slowly in front of the ultrasonic |
 | `PASS: ultrasonic saw near (<20 cm) and far (>30 cm)` | the sensor works at both ends |
+| `SERVO CENTRE: note the angle at which the sensor faces STRAIGHT AHEAD` | the servo steps from raw −20° to +20°, 2° per second. Sight along the car and note the angle where the sensor points straight ahead; put it in `S5_SERVO_TRIM_DEG`, rebuild, and run the test again. |
+| `SERVO RANGE: watch the ultrasonic's wires…` | the servo steps 5° at a time, RIGHT 5→40° then LEFT 5→40°, measured from straight ahead, printing each angle. Note the last angle on each side before the wires pull. |
+| `now set S5_SCAN_ARC_DEG … it is N` | put the smaller of your two angles into `S5_SCAN_ARC_DEG` in `subsystem5.h` |
 
 ## Still to test on the bench
 
@@ -68,6 +71,8 @@ These need the real track or instruments, so the self-test cannot do them:
 | What | Where | Now |
 |---|---|---|
 | Servo fixed straight ahead | `S5_SERVO_FIXED` | 1 |
+| Servo scan arc, each side (measure it) | `S5_SCAN_ARC_DEG` | 30° |
+| Servo trim, so 0 = straight ahead | `S5_SERVO_TRIM_DEG` | 0° |
 | Stop / detect distance | `PROV_D_STOP_CM` / `PROV_D_DETECT_CM` in `app.h` | 20 / 30 cm |
 | Readings in a row to act | `S5_CONFIRM_PINGS` | 2 |
 | Search step / lost time before search | `VC_SEARCH_STEP_DEG` / `VC_LOST_SEARCH_MS` in `vehicle_controller.c` | 20° / 600 ms |

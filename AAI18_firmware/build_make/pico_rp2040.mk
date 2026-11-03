@@ -87,11 +87,12 @@ endif
 # Group AAI18 addition: TEST_BUDDY=1..5 builds a self-test image that runs
 # ONLY that buddy's test (subsystemN_test), named ..._test_bN.uf2, so each
 # buddy can test their own part.  It implies TEST=1.  TEST_BUDDY=0 (the
-# default) runs every buddy's test, as before.
+# default) runs every buddy's test, as before.  TEST_BUDDY=6 is the
+# ultrasonic bench test only (..._test_us.uf2).
 TEST ?= 0
 TEST_BUDDY ?= 0
-ifneq ($(filter $(TEST_BUDDY),0 1 2 3 4 5),$(TEST_BUDDY))
-$(error Unknown TEST_BUDDY '$(TEST_BUDDY)'; use 0 (all) or 1..5)
+ifneq ($(filter $(TEST_BUDDY),0 1 2 3 4 5 6),$(TEST_BUDDY))
+$(error Unknown TEST_BUDDY '$(TEST_BUDDY)'; use 0 (all), 1..5, or 6 (ultrasonic bench))
 endif
 ifneq ($(TEST_BUDDY),0)
 override TEST := 1
@@ -103,6 +104,9 @@ ifeq ($(TEST),1)
 TEST_SUFFIX := _test
 ifneq ($(TEST_BUDDY),0)
 TEST_SUFFIX := _test_b$(TEST_BUDDY)
+endif
+ifeq ($(TEST_BUDDY),6)
+TEST_SUFFIX := _test_us
 endif
 endif
 

@@ -35,6 +35,18 @@ static volatile bool b_reset_request = false;
 static volatile s4_state_t state         = S4_INIT_CAL;
 static volatile int8_t     tilt_deg      = 0;   /* pitch: + nose up      */
 static volatile int8_t     roll_deg      = 0;   /* roll: side to side    */
+static int32_t  pitch_x8 = 0;                   /* filter state, x 8    */
+
+/* Side ramp (roll) state.  Written by imu_task only. */
+static volatile uint16_t side_height_mm = 0u;   /* last result          */
+static volatile int8_t   side_sign      = 0;
+static bool     b_side_active  = false;
+static bool     b_side_reported = false;
+static uint8_t  side_debounce  = 0u;
+static int32_t  side_peak_deg  = 0;
+static int32_t  side_dir       = 0;
+static uint32_t side_start_ms  = 0u;
+static int32_t  roll_x8  = 0;
 static volatile uint8_t    hump_packed   = 0u;   /* msg_pack_hump()  */
 static volatile bool       b_run_invalid = false;
 
@@ -56,6 +68,8 @@ static uint8_t  consecutive_fail = 0u;
 static bool     b_calibrated  = false;
 static uint32_t cal_samples   = 0u;
 static int32_t  cal_spread_mg = 0;
+static int32_t  cal_wobble_mg = 0;           /* mean |deviation|        */
+static int16_t  cal_x[S4_CAL_SAMPLES];      /* raw X samples, one pass */
 
 /* Impact debounce: samples in a row over the threshold, carried across
    batches, and the strongest one seen in the current run of them. */
@@ -150,7 +164,11 @@ static bool calibrate(void)
     int32_t  min_x = 32767;
     int32_t  max_x = -32768;
     int32_t  axis_x;
+    int32_t  mean_x;
+    int32_t  dev_sum = 0;
+    int32_t  dev;
     uint32_t count;
+    uint32_t idx;
     bool     b_ok = false;
 
     for (count = 0u; count < S4_CAL_SAMPLES; count++)
@@ -160,21 +178,42 @@ static bool calibrate(void)
         {
             break;
         }
-        axis_x = (int32_t)get_axis(&buf[0]);
-        sum_x += axis_x;
-        sum_y += (int32_t)get_axis(&buf[2]);
-        min_x  = (axis_x < min_x) ? axis_x : min_x;
-        max_x  = (axis_x > max_x) ? axis_x : max_x;
+        axis_x         = (int32_t)get_axis(&buf[0]);
+        cal_x[count]   = (int16_t)axis_x;
+        sum_x         += axis_x;
+        sum_y         += (int32_t)get_axis(&buf[2]);
+        min_x          = (axis_x < min_x) ? axis_x : min_x;
+        max_x          = (axis_x > max_x) ? axis_x : max_x;
     }
 
     cal_samples   = count;
     cal_spread_mg = (0u == count) ? 0 : to_milli_g(max_x - min_x);
+    cal_wobble_mg = 0;
 
-    if ((S4_CAL_SAMPLES == count) && (cal_spread_mg <= S4_CAL_MAX_SPREAD_MG))
+    if (S4_CAL_SAMPLES == count)
     {
-        offset_x = (int16_t)(sum_x / (int32_t)S4_CAL_SAMPLES);
-        offset_y = (int16_t)(sum_y / (int32_t)S4_CAL_SAMPLES);
-        b_ok     = true;
+        /*
+         * "Held still" is judged on the MEAN deviation from the average,
+         * not the spread (max - min).  The spread is set by the single
+         * worst sample: a buzzing servo or one noisy reading made it
+         * 234 mg on a car that was not moving (bench log), so calibration
+         * never passed.  Vibration averages out of the offsets anyway;
+         * only real handling moves the mean deviation.
+         */
+        mean_x = sum_x / (int32_t)S4_CAL_SAMPLES;
+        for (idx = 0u; idx < S4_CAL_SAMPLES; idx++)
+        {
+            dev      = (int32_t)cal_x[idx] - mean_x;
+            dev_sum += (dev < 0) ? -dev : dev;
+        }
+        cal_wobble_mg = to_milli_g(dev_sum / (int32_t)S4_CAL_SAMPLES);
+
+        if (cal_wobble_mg <= S4_CAL_MAX_WOBBLE_MG)
+        {
+            offset_x = (int16_t)mean_x;
+            offset_y = (int16_t)(sum_y / (int32_t)S4_CAL_SAMPLES);
+            b_ok     = true;
+        }
     }
 
     return (b_ok);
@@ -211,8 +250,8 @@ static bool calibrate_at_boot(void)
 
     if (b_ok)
     {
-        APP_LOG((UB*)"[S4] IMU calibrated (spread %d mg)\n",
-                  (INT)cal_spread_mg);
+        APP_LOG((UB*)"[S4] IMU calibrated (wobble %d mg, spread %d mg)\n",
+                (INT)cal_wobble_mg, (INT)cal_spread_mg);
     }
     else if (S4_CAL_SAMPLES != cal_samples)
     {
@@ -230,9 +269,10 @@ static bool calibrate_at_boot(void)
     }
     else
     {
-        APP_LOG((UB*)"[S4] IMU CAL FAILED: car moving (spread %d mg, "
-                       "limit %d) -- keep it still at power-up\n",
-                  (INT)cal_spread_mg, (INT)S4_CAL_MAX_SPREAD_MG);
+        APP_LOG((UB*)"[S4] IMU CAL FAILED: car moving (wobble %d mg, "
+                     "limit %d; spread %d) -- keep it still at power-up\n",
+                (INT)cal_wobble_mg, (INT)S4_CAL_MAX_WOBBLE_MG,
+                (INT)cal_spread_mg);
     }
 
     return (b_ok);
@@ -388,6 +428,8 @@ static void update_tilt(const uint8_t *p_buf, uint8_t count)
     int32_t  ax_mg;
     int32_t  ay_mg;
     int32_t  az_mg;
+    int32_t  fwd_mg;
+    int32_t  side_mg;
 
     ax_mg = to_milli_g((int32_t)get_axis(&p_buf[base]) - (int32_t)offset_x);
     ay_mg = to_milli_g((int32_t)get_axis(&p_buf[base + 2u])
@@ -395,9 +437,135 @@ static void update_tilt(const uint8_t *p_buf, uint8_t count)
     az_mg = to_milli_g((int32_t)get_axis(&p_buf[base + 4u]));
 
     /* Same atan maths for both axes: pitch from X (front-back), roll
-       from Y (side to side), each against Z. */
-    tilt_deg = s4_pitch_deg(ax_mg, az_mg);
-    roll_deg = s4_pitch_deg(ay_mg, az_mg);
+       from Y (side to side), each against Z.  Low-pass filtered (each
+       10 ms step moves 1/S4_TILT_FILTER_DIV of the way): driving
+       vibration shook the raw angles by +-25 deg (bench log: roll 29 on
+       a flat floor), close to the 30 deg TILT fault. */
+    /* IMU mounting (subsystem4.h): which chip axis points forward. */
+    fwd_mg  = (1 == S4_IMU_SWAP_XY) ? ay_mg : ax_mg;
+    side_mg = (1 == S4_IMU_SWAP_XY) ? ax_mg : ay_mg;
+    fwd_mg  = (1 == S4_IMU_INVERT_PITCH) ? -fwd_mg : fwd_mg;
+    side_mg = (1 == S4_IMU_INVERT_ROLL) ? -side_mg : side_mg;
+
+    pitch_x8 += (((int32_t)s4_pitch_deg(fwd_mg, az_mg) * 8) - pitch_x8)
+              / S4_TILT_FILTER_DIV;
+    roll_x8  += (((int32_t)s4_pitch_deg(side_mg, az_mg) * 8) - roll_x8)
+              / S4_TILT_FILTER_DIV;
+    tilt_deg  = (int8_t)(pitch_x8 / 8);
+    roll_deg  = (int8_t)(roll_x8 / 8);
+}
+
+/* Height of the raised side for a roll angle, mm (one side on the floor). */
+static uint16_t side_height_for(int32_t roll_abs_deg)
+{
+    int32_t deg = (roll_abs_deg > 45) ? 45 : roll_abs_deg;
+
+    return ((uint16_t)((S4_WHEEL_SPACING_MM * (int32_t)sin_q8[deg]) / 256));
+}
+
+/* Report the current side ramp on the console (and car18/log). */
+static void report_side(const char *p_when)
+{
+    side_height_mm = side_height_for(side_peak_deg);
+    side_sign      = (int8_t)side_dir;
+
+    APP_LOG((UB*)"[S4] side ramp %s: %s side up, peak roll %d deg -> "
+                 "%d mm\n", p_when,
+            (side_dir > 0) ? "roll+" : "roll-", (INT)side_peak_deg,
+            (INT)side_height_mm);
+}
+
+/*
+ * One side ramp (left or right wheels raised): track the peak roll while
+ * it lasts and report the raised side's height when the car is level
+ * again (or once, if it is still raised after S4_SIDE_REPORT_MS).  Runs
+ * whenever the IMU is calibrated, driving or parked, so it can also be
+ * tried by lifting one side of the car by hand.
+ */
+/*
+ * True while the car is being STEERED: the two wheels are driven in
+ * opposite directions (a spin) or at clearly different duty (> 25 %
+ * apart).  A turn pushes the chassis sideways (centripetal
+ * acceleration), which the accelerometer cannot tell from a real roll,
+ * so a side ramp is neither started nor measured then.  Judged on what
+ * the wheels are TOLD to do, not on how fast they turn: a parked car
+ * pushed or tilted by hand (duty 0) is never "turning", and a wheel that
+ * slows on the climb does not cancel the measurement.
+ */
+static bool is_turning(void)
+{
+    int32_t duty_l = 0;
+    int32_t duty_r = 0;
+    int32_t mag_l;
+    int32_t mag_r;
+    int32_t diff;
+
+    motor_get_applied(&duty_l, &duty_r);
+    mag_l = (duty_l < 0) ? -duty_l : duty_l;
+    mag_r = (duty_r < 0) ? -duty_r : duty_r;
+    diff  = mag_l - mag_r;
+    diff  = (diff < 0) ? -diff : diff;
+
+    return (((duty_l < 0) && (duty_r > 0))           /* spin            */
+            || ((duty_l > 0) && (duty_r < 0))
+            || ((diff * 4) > (mag_l + mag_r)));      /* >25 % apart     */
+}
+
+static void step_side_ramp(void)
+{
+    int32_t roll    = (int32_t)roll_deg;
+    int32_t mag     = (roll < 0) ? -roll : roll;
+    int32_t dir     = (roll < 0) ? -1 : 1;
+    bool    b_turn  = is_turning();
+
+    if (!b_calibrated)
+    {
+        b_side_active = false;
+        side_debounce = 0u;
+    }
+    else if (!b_side_active)
+    {
+        side_debounce = ((mag >= S4_SIDE_START_DEG) && !b_turn)
+                      ? (uint8_t)(side_debounce + 1u) : 0u;
+        if (side_debounce >= (uint8_t)S4_SIDE_DEBOUNCE)
+        {
+            b_side_active   = true;
+            b_side_reported = false;
+            side_debounce   = 0u;
+            side_peak_deg   = mag;
+            side_dir        = dir;
+            side_start_ms   = app_now_ms();
+            APP_LOG((UB*)"[S4] side ramp start (%s)\n",
+                    (dir > 0) ? "roll+" : "roll-");
+        }
+    }
+    else
+    {
+        if ((dir == side_dir) && (mag > side_peak_deg) && !b_turn)
+        {
+            side_peak_deg = mag;
+        }
+
+        side_debounce = (mag < S4_SIDE_LEVEL_DEG)
+                      ? (uint8_t)(side_debounce + 1u) : 0u;
+
+        if (side_debounce >= (uint8_t)S4_SIDE_DEBOUNCE)
+        {
+            report_side("done");
+            b_side_active = false;
+            side_debounce = 0u;
+        }
+        else if (!b_side_reported
+                 && ((app_now_ms() - side_start_ms) > S4_SIDE_REPORT_MS))
+        {
+            report_side("still raised");
+            b_side_reported = true;
+        }
+        else
+        {
+            /* On the ramp. */
+        }
+    }
 }
 
 /*
@@ -423,8 +591,10 @@ static bool detect_impact(const uint8_t *p_buf, uint8_t count)
         ay_mg = to_milli_g((int32_t)get_axis(&p_buf[(idx * 6u) + 2u])
                            - (int32_t)offset_y);
 
-        /* Horizontal jolt magnitude, squared (no square root needed). */
-        mag_sq = (ax_mg * ax_mg) + (ay_mg * ay_mg);
+        /* FORE-AFT jolt only, squared.  Hard line-following swerves
+           (wheels 58/2 -> 9/51) threw the car SIDEWAYS at 2.2 g and
+           latched a false COLLISION; a real hit is along the car. */
+        mag_sq = (1 == S4_IMU_SWAP_XY) ? (ay_mg * ay_mg) : (ax_mg * ax_mg);
 
         if (mag_sq > limit_sq)
         {
@@ -617,6 +787,7 @@ EXPORT void imu_task(INT stacd, void *p_exinf)
             if (count > 0)
             {
                 update_tilt(buf, (uint8_t)count);
+                step_side_ramp();
             }
 
             if (S4_IMU_FAULT == state)
@@ -648,6 +819,25 @@ EXPORT void imu_task(INT stacd, void *p_exinf)
 EXPORT uint8_t s4_get_hump_packed(void)
 {
     return (hump_packed);
+}
+
+EXPORT uint16_t s4_get_side_height_mm(void)
+{
+    return (side_height_mm);
+}
+
+EXPORT uint16_t s4_get_side_live_mm(void)
+{
+    int32_t roll = (int32_t)roll_deg;
+
+    roll = (roll < 0) ? -roll : roll;
+
+    return (b_side_active ? side_height_for(roll) : 0u);
+}
+
+EXPORT int8_t s4_get_side_sign(void)
+{
+    return (side_sign);
 }
 
 EXPORT int8_t s4_get_roll_deg(void)

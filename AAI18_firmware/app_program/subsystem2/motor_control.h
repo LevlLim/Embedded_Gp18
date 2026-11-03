@@ -35,10 +35,11 @@ void motor_pid_reset(void);
 /* One PID iteration for one wheel.  Returns a signed duty correction. */
 int32_t motor_pid_step(int32_t setpoint, int32_t measured, bool b_left_wheel);
 
-/* Encoder / geometry conversions.  Integer maths only. */
-int32_t motor_counts_to_mm(int32_t counts);
-int32_t motor_mm_to_counts(int32_t millimetres);
-int32_t motor_degrees_to_counts(int32_t degrees);
+/* Encoder / geometry conversions, per wheel (each has its own counts per
+   revolution).  Integer maths only. */
+int32_t motor_counts_to_mm(int32_t counts, bool b_left_wheel);
+int32_t motor_mm_to_counts(int32_t millimetres, bool b_left_wheel);
+int32_t motor_degrees_to_counts(int32_t degrees, bool b_left_wheel);
 
 #endif /* MOTOR_CONTROL_H */
 

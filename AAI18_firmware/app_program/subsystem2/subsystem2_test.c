@@ -50,7 +50,8 @@ EXPORT void subsystem2_test(void)
 
     /* ---- geometry conversions ---- */
     tm_printf((UB*)"[TEST-S2] 100 mm = %d counts, 90 deg = %d counts\n",
-              (INT)motor_mm_to_counts(100), (INT)motor_degrees_to_counts(90));
+              (INT)motor_mm_to_counts(100, true),
+              (INT)motor_degrees_to_counts(90, true));
 
     /* ---- encoders actually count ---- */
     gpio_irq_read_encoders(&enc);

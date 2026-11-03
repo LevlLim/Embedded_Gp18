@@ -18,6 +18,7 @@
 #include "subsystem1.h"
 #include "../fault.h"
 #include "../drivers/rp2040_regs.h"
+#include "../drivers/gpio_irq.h"
 #include "../subsystem3/subsystem3.h"
 #include "../subsystem3/adc_sampler.h"
 #include "../subsystem2/subsystem2.h"
@@ -162,6 +163,57 @@ static void publish(uint8_t topic_id, const uint8_t *p_payload, uint8_t len)
 #endif
 }
 
+/* RP2040 reset-cause registers (datasheet 2.10.6 CHIP_RESET, 4.7.6
+   WATCHDOG REASON).  They keep their value until the next reset. */
+#define S1_CHIP_RESET_REG       (0x40064008u)
+#define S1_HAD_POR              (1u << 8)   /* power-on OR brown-out    */
+#define S1_HAD_RUN              (1u << 16)  /* RUN pin (reset button)   */
+#define S1_WDOG_REASON_REG      (0x40058008u)
+#define S1_WDOG_ANY             (0x03u)     /* timer or forced          */
+
+/* Why the Pico last started, for the console. */
+static const char *reset_reason(void)
+{
+    uint32_t chip = in_w(S1_CHIP_RESET_REG);
+    const char *p_why = "unknown";
+
+    if (0u != (in_w(S1_WDOG_REASON_REG) & S1_WDOG_ANY))
+    {
+        p_why = "watchdog / reboot after flashing";
+    }
+    else if (0u != (chip & S1_HAD_RUN))
+    {
+        p_why = "reset button (RUN pin)";
+    }
+    else if (0u != (chip & S1_HAD_POR))
+    {
+        p_why = "power on OR battery brown-out";
+    }
+    else
+    {
+        /* None of the above. */
+    }
+
+    return (p_why);
+}
+
+/*
+ * One line every time the MQTT link comes up.  A car that "just stopped"
+ * and then shows "up 9 s" here has restarted: the boot lines were printed
+ * before Wi-Fi was back, so they never reached the laptop.
+ */
+static void report_link_up(void)
+{
+    static s1_conn_state_t last_state = S1_RECONNECTING;
+
+    if ((S1_CONNECTED == conn_state) && (S1_CONNECTED != last_state))
+    {
+        APP_LOG((UB*)"[S1] MQTT connected: car up %d s, last reset: %s\n",
+                (INT)(app_now_ms() / 1000u), reset_reason());
+    }
+    last_state = conn_state;
+}
+
 /*
  * WIFI_LOSS is the one fault bit Telemetry owns and may clear (Fault
  * Table).  It is REPORT-only, so it never affects driving.
@@ -185,41 +237,73 @@ static void update_wifi_fault(void)
  * One human-readable line: both line sensors (B = above its threshold,
  * i.e. dark, W = light), the thresholds, the steering error the car is
  * using, the duty each wheel is actually getting, and the IMU pitch
- * (+ = nose up) and roll (side to side) in degrees, flagged if the IMU
- * is in fault.
+ * (+ = nose up) and roll (side to side) in degrees, the encoder totals
+ * (left/right, for measuring counts per wheel turn by hand), the latest
+ * ultrasonic distance ahead (0 = no echo / nothing in range), flagged if
+ * the IMU is in fault.
  */
+/* Short mission name for the debug line.  With the fault mask beside it,
+   every [DBG] line says WHY the car is stopped, even when the one-off
+   "[S5] ..." line about it was lost on a Wi-Fi hiccup. */
+static const char *mission_name(void)
+{
+    static const char *const names[5] = { "INIT", "READY", "RUN",
+                                          "STOP", "FAULT" };
+    uint8_t parent = 0u;
+
+    msg_decode_veh_state(s5_get_encoded_state(), &parent, NULL);
+
+    return ((parent < 5u) ? names[parent] : "?");
+}
+
 static void print_debug_line(void)
 {
-    adc_sample_t s_side   = {0};
-    adc_sample_t s_centre = {0};
+    adc_sample_t s_left   = {0};
+    adc_sample_t s_right  = {0};
+    adc_sample_t s_bc     = {0};
+    uint16_t     thr_bc;
     msg_line_t   line     = {0};
     uint32_t     word     = 0u;
-    uint16_t     thr_side = 0u;
-    uint16_t     thr_ctr  = 0u;
+    uint16_t     thr_l    = 0u;
+    uint16_t     thr_r    = 0u;
     int32_t      duty_l   = 0;
     int32_t      duty_r   = 0;
+    gpio_irq_encoders_t enc = {0};
 
-    (void)adc_sampler_read(ADC_CH_LINE_L, &s_side);
-    (void)adc_sampler_read(ADC_CH_LINE_C, &s_centre);
-    s3_get_thresholds(&thr_side, &thr_ctr);
+    gpio_irq_read_encoders(&enc);
+    (void)adc_sampler_read(S3_CH_LEFT, &s_left);
+    (void)adc_sampler_read(S3_CH_RIGHT, &s_right);
+    (void)adc_sampler_read(ADC_CH_BARCODE, &s_bc);
+    thr_bc = s3_get_barcode_threshold();
+    s3_get_thresholds(&thr_l, &thr_r);
     motor_get_applied(&duty_l, &duty_r);
     if (s3_read_line_word(&word))
     {
         msg_unpack_line(word, &line);
     }
 
-    APP_LOG((UB*)"[DBG] side %4d/%4d %s  ctr %4d/%4d %s  err %3d %s"
-                   "  duty L %3d R %3d  pitch %3d roll %3d%s\n",
-              (INT)s_side.value, (INT)thr_side,
-              ((uint32_t)s_side.value > thr_side) ? "B" : "W",
-              (INT)s_centre.value, (INT)thr_ctr,
-              ((uint32_t)s_centre.value > thr_ctr) ? "B" : "W",
+    /* Single spaces: with the barcode sensor added the longest possible
+       line is exactly APP_LOG_MAX (160) characters. */
+    APP_LOG((UB*)"[DBG] L %4d/%4d %s R %4d/%4d %s bc %4d/%4d %s"
+                   " err %3d %s jct %d duty L %3d R %3d pitch %3d roll %3d"
+                   " enc %d/%d us %dcm sv %d ramp %dmm %s f%03x\n",
+              (INT)s_left.value, (INT)thr_l,
+              ((uint32_t)s_left.value > thr_l) ? "B" : "W",
+              (INT)s_right.value, (INT)thr_r,
+              ((uint32_t)s_right.value > thr_r) ? "B" : "W",
+              (INT)s_bc.value, (INT)thr_bc,
+              ((uint32_t)s_bc.value > thr_bc) ? "B" : "W",
               (INT)line.error,
               line.b_valid ? "ok" : "--",
+              (INT)s3_get_junction_count(),
               (INT)duty_l, (INT)duty_r,
               (INT)s4_get_tilt_deg(), (INT)s4_get_roll_deg(),
-              (0u != ((uint32_t)fault_get() & FAULT_IMU)) ? " IMU-FAULT"
-                                                          : "");
+              (INT)enc.count_left, (INT)enc.count_right,
+              (INT)s5_get_obstacle_distance_cm(),
+              (INT)s5_get_servo_angle(),
+              (INT)s4_get_side_live_mm(),
+              mission_name(),
+              (INT)fault_get());
 }
 
 /*
@@ -254,11 +338,12 @@ static void send_state_frame(void)
     /* Readable line: console, and car18/log over Wi-Fi.  Binary frame:
        always over Wi-Fi; on the console only if the readable line is
        off (two lines every 200 ms would bury everything else). */
-    if (1 == S1_DEBUG_PRINT)
+    if ((1 == S1_DEBUG_PRINT) && (6 != APP_TEST_BUDDY))
     {
-        print_debug_line();
+        print_debug_line();     /* not in the ultrasonic bench test */
     }
-    if ((0u != len) && ((1 == S1_USE_MQTT) || (0 == S1_DEBUG_PRINT)))
+    if ((0u != len) && ((1 == S1_USE_MQTT)
+                        || ((0 == S1_DEBUG_PRINT) && (6 != APP_TEST_BUDDY))))
     {
         publish(S1_TOPIC_ID_STATE, buf, len);
     }
@@ -378,6 +463,7 @@ EXPORT void telemetry_task(INT stacd, void *p_exinf)
         (void)app_wait_period();
 
         update_wifi_fault();
+        report_link_up();
         send_state_frame();
 
         /* ---- fault topic, published on CHANGE ---- */
@@ -495,6 +581,91 @@ EXPORT int app_mqtt_next_publish(const char **pp_topic, unsigned char *p_buf,
     return (len);
 }
 
+/* True if the payload is exactly the given lower-case word. */
+static bool payload_is(const unsigned char *p_data, int len,
+                       const char *p_word)
+{
+    int  idx    = 0;
+    bool b_same = true;
+
+    while (b_same && ('\0' != p_word[idx]))
+    {
+        b_same = (idx < len) && ((char)p_data[idx] == p_word[idx]);
+        idx++;
+    }
+
+    return (b_same && (idx == len));
+}
+
+static void text_command(const unsigned char *p_data, int len)
+{
+    uint8_t seq = (uint8_t)(last_cmd_seq + 1u);
+    uint8_t command = 0u;
+
+    if (payload_is(p_data, len, "start"))
+    {
+        command = S1_CMD_START;
+    }
+    else if (payload_is(p_data, len, "stop"))
+    {
+        command = S1_CMD_STOP;
+    }
+    else if (payload_is(p_data, len, "reset"))
+    {
+        command = S1_CMD_RESET;
+    }
+    else if (payload_is(p_data, len, "left"))
+    {
+        s5_manual_move(MSG_CMD_TURN_L, S5_MANUAL_TURN_DEG);
+        return;
+    }
+    else if (payload_is(p_data, len, "right"))
+    {
+        s5_manual_move(MSG_CMD_TURN_R, S5_MANUAL_TURN_DEG);
+        return;
+    }
+    else if (payload_is(p_data, len, "fwd"))
+    {
+        s5_manual_move(MSG_CMD_FORWARD, S5_MANUAL_FWD_MM);
+        return;
+    }
+    else if (payload_is(p_data, len, "back"))
+    {
+        s5_manual_move(MSG_CMD_REVERSE, S5_MANUAL_BACK_MM);
+        return;
+    }
+    else if (payload_is(p_data, len, "jleft"))
+    {
+        s5_inject_turn((uint8_t)MSG_BC_LEFT);
+        return;
+    }
+    else if (payload_is(p_data, len, "jright"))
+    {
+        s5_inject_turn((uint8_t)MSG_BC_RIGHT);
+        return;
+    }
+    else if (payload_is(p_data, len, "jstraight"))
+    {
+        s5_inject_turn((uint8_t)MSG_BC_STRAIGHT);
+        return;
+    }
+    else if (payload_is(p_data, len, "juturn"))
+    {
+        s5_inject_turn((uint8_t)MSG_BC_U_TURN);
+        return;
+    }
+    else
+    {
+        /* Unknown word: s1_accept_command() logs and rejects command 0. */
+    }
+
+    APP_LOG((UB*)"[S1] remote command: %s\n",
+            (S1_CMD_START == command) ? "START"
+            : ((S1_CMD_STOP == command) ? "STOP"
+               : ((S1_CMD_RESET == command) ? "RESET" : "unknown")));
+    (void)s1_accept_command(seq, command);
+}
+
 EXPORT void app_mqtt_on_message(const char *p_topic,
                                 const unsigned char *p_data, int len)
 {
@@ -514,6 +685,17 @@ EXPORT void app_mqtt_on_message(const char *p_topic,
     if (b_match && ((int)MSG_LEN_COMMAND == len))
     {
         (void)s1_accept_command(p_data[0], p_data[1]);
+    }
+    else if (b_match)
+    {
+        /* Text command for a person at a laptop (mosquitto_pub -m start):
+           "start", "stop" or "reset".  It takes the next sequence number
+           itself, so it is always fresh. */
+        text_command(p_data, len);
+    }
+    else
+    {
+        /* Another topic: not for us. */
     }
 }
 

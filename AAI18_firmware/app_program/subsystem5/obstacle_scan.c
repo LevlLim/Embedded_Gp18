@@ -97,10 +97,13 @@ static void servo_point(int32_t angle_deg)
         /* In range. */
     }
 
-    /* 1 us per count, so the compare value is the pulse width. */
+    /* 1 us per count, so the compare value is the pulse width.  The trim
+       is added after the clamp: the clamp is about the sensor's wires,
+       measured from straight ahead. */
     (void)pwm_set_cc(PIN_SERVO_SCAN,
                      (UW)((int32_t)S5_SERVO_CENTRE_US
-                          + (angle * (int32_t)S5_SERVO_US_PER_DEG)));
+                          + ((angle + S5_SERVO_TRIM_DEG)
+                             * (int32_t)S5_SERVO_US_PER_DEG)));
     servo_angle = (int8_t)angle;
 }
 
@@ -360,28 +363,48 @@ static int32_t step_angle(uint32_t idx)
 
 /*
  * Free lateral room beyond one edge of the object: walk outward from the
- * edge until a return nearer than S5_CLEAR_RANGE_CM blocks it.  With no
- * blocker, the room runs to where the scan arc meets the clear range.
+ * edge until a return nearer than S5_CLEAR_RANGE_CM blocks it.
+ *
+ * If at least one step beyond the edge was looked at and NOTHING blocked
+ * it out to the edge of the scan, that side is open as far as the sensor
+ * can see: report it as unlimited (saturates to MSG_MAX_OBST_CLEAR).
+ * With the servo arc limited to +-30 degrees (sensor wiring), "the room
+ * the arc can see" was never enough for the car's width, so every
+ * obstacle ended in back-off, rescan, abort (bench log).  If the object
+ * itself reaches the scan edge, that side is unknown and NOT open.
  */
 static int32_t clearance_cm(const uint8_t *p_cm, uint8_t steps,
                             int32_t edge_x, uint32_t edge_idx, int32_t dir)
 {
-    int32_t limit_x = s5_lateral_cm(S5_CLEAR_RANGE_CM,
-                                    step_angle((dir < 0) ? 0u : (steps - 1u)));
+    int32_t limit_x = 0;
     int32_t idx     = (int32_t)edge_idx + dir;
     int32_t room;
+    bool    b_blocked = false;
+    bool    b_looked  = false;
 
-    while ((idx >= 0) && (idx < (int32_t)steps))
+    while ((idx >= 0) && (idx < (int32_t)steps) && !b_blocked)
     {
+        b_looked = true;
         if ((0u != p_cm[idx]) && (p_cm[idx] < S5_CLEAR_RANGE_CM))
         {
-            limit_x = s5_lateral_cm(p_cm[idx], step_angle((uint32_t)idx));
-            break;
+            limit_x   = s5_lateral_cm(p_cm[idx], step_angle((uint32_t)idx));
+            b_blocked = true;
         }
         idx += dir;
     }
 
-    room = (dir < 0) ? (edge_x - limit_x) : (limit_x - edge_x);
+    if (!b_looked)
+    {
+        room = 0;                       /* object fills the scan edge   */
+    }
+    else if (!b_blocked)
+    {
+        room = 255;                     /* open to the edge of the scan */
+    }
+    else
+    {
+        room = (dir < 0) ? (edge_x - limit_x) : (limit_x - edge_x);
+    }
 
     return ((room < 0) ? 0 : room);
 }
@@ -492,7 +515,10 @@ EXPORT ER s5_obstacle_init(void)
           SERVO_CLK_DIV << PWM_DIV_INT_SHIFT);
     (void)pwm_set_pin(PIN_SERVO_SCAN);
     (void)pwm_set_wrap(PIN_SERVO_SCAN, SERVO_FRAME_US - 1u);
-    (void)pwm_set_cc(PIN_SERVO_SCAN, S5_SERVO_CENTRE_US);
+    (void)pwm_set_cc(PIN_SERVO_SCAN,
+                     (UW)((int32_t)S5_SERVO_CENTRE_US
+                          + (S5_SERVO_TRIM_DEG
+                             * (int32_t)S5_SERVO_US_PER_DEG)));
     (void)pwm_set_enabled(PIN_SERVO_SCAN, TRUE);
 
     return ((h_mbf_obstacle < E_OK) ? (ER)h_mbf_obstacle : E_OK);
@@ -580,6 +606,28 @@ EXPORT void obstacle_task(INT stacd, void *p_exinf)
             }
         }
     }
+}
+
+#if APP_TEST
+EXPORT void s5_servo_test_raw(int32_t angle_deg)
+{
+    int32_t angle = angle_deg;
+
+    angle = (angle > 80) ? 80 : ((angle < -80) ? -80 : angle);
+    (void)pwm_set_cc(PIN_SERVO_SCAN,
+                     (UW)((int32_t)S5_SERVO_CENTRE_US
+                          + (angle * (int32_t)S5_SERVO_US_PER_DEG)));
+}
+
+EXPORT void s5_servo_test_point(int32_t angle_deg)
+{
+    s5_servo_test_raw(angle_deg + S5_SERVO_TRIM_DEG);
+}
+#endif
+
+EXPORT int32_t s5_get_servo_angle(void)
+{
+    return ((int32_t)servo_angle);
 }
 
 EXPORT uint8_t s5_get_obstacle_distance_cm(void)

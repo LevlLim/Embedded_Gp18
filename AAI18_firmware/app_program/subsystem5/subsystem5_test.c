@@ -92,6 +92,128 @@ static void range_check(void)
     }
 }
 
+/*
+ * Find the trim: step the servo from 20 degrees left to 20 degrees right
+ * of its OWN centre, 2 degrees per second, printing each angle.  The
+ * tester notes the angle at which the ultrasonic faces straight ahead
+ * (sight along the car) and puts it in S5_SERVO_TRIM_DEG.
+ */
+static void servo_centre_check(void)
+{
+    int32_t angle;
+
+    tm_printf((UB*)"[TEST-S5] SERVO CENTRE: note the angle at which the "
+                   "sensor faces STRAIGHT AHEAD (trim now %d)\n",
+              (INT)S5_SERVO_TRIM_DEG);
+
+    for (angle = -20; angle <= 20; angle += 2)
+    {
+        s5_servo_test_raw(angle);
+        tm_printf((UB*)"[TEST-S5]   servo raw %d deg\n", (INT)angle);
+        (void)tk_dly_tsk(1000);
+    }
+
+    s5_servo_test_point(0);
+    tm_printf((UB*)"[TEST-S5] set S5_SERVO_TRIM_DEG (subsystem5.h) to that "
+                   "angle, then run this test again for the range\n");
+    (void)tk_dly_tsk(1500);
+}
+
+/*
+ * Step the servo out 5 degrees at a time (up to 40, the measured safe
+ * maximum), 1 s per step, first to the
+ * RIGHT then to the LEFT, printing each angle.  The tester watches the
+ * ultrasonic's wires and notes the last angle on each side before they
+ * pull; S5_SCAN_ARC_DEG is then the smaller of the two.
+ */
+static void servo_range_check(void)
+{
+    int32_t angle;
+    int32_t side;
+
+    tm_printf((UB*)"[TEST-S5] SERVO RANGE (from straight ahead, trim %d): "
+                   "note the LAST angle before the wires pull, each side\n",
+              (INT)S5_SERVO_TRIM_DEG);
+    s5_servo_test_point(0);
+    (void)tk_dly_tsk(1500);
+
+    for (side = 1; side >= -1; side -= 2)
+    {
+        for (angle = 5; angle <= 40; angle += 5)
+        {
+            /* Never past 40 degrees from the servo's OWN centre (the
+               measured safe limit), whatever the trim. */
+            if (((side * angle) + S5_SERVO_TRIM_DEG) > 40
+                || ((side * angle) + S5_SERVO_TRIM_DEG) < -40)
+            {
+                break;
+            }
+            s5_servo_test_point(side * angle);
+            tm_printf((UB*)"[TEST-S5]   servo %s %d deg\n",
+                      (side > 0) ? "RIGHT" : "LEFT ", (INT)angle);
+            (void)tk_dly_tsk(1000);
+        }
+        s5_servo_test_point(0);
+        tm_printf((UB*)"[TEST-S5]   servo back to centre\n");
+        (void)tk_dly_tsk(1500);
+    }
+
+    tm_printf((UB*)"[TEST-S5] now set S5_SCAN_ARC_DEG (subsystem5.h) to "
+                   "the smaller of the two angles; it is %d\n",
+              (INT)S5_SCAN_ARC_DEG);
+}
+
+EXPORT void s5_ultrasonic_bench(void)
+{
+    gpio_irq_echo_t echo  = {0};
+    uint32_t        last_seq;
+    uint32_t        pulses;
+    uint32_t        line  = 0u;
+    const char     *p_verdict;
+
+    s5_servo_test_point(0);
+    (void)gpio_irq_read_echo(&echo);
+    last_seq = echo.seq;
+
+    for (;;)
+    {
+        if (0u == (line % 20u))
+        {
+            tm_printf((UB*)"[US] ultrasonic bench test: TRIG GP0, ECHO GP1, "
+                           "servo straight. Hold a flat object at 10..100 cm "
+                           "in front.\n");
+        }
+        line = line + 1u;
+
+        (void)tk_dly_tsk(250);
+        (void)gpio_irq_read_echo(&echo);
+        pulses   = echo.seq - last_seq;     /* ~4 per 250 ms when working */
+        last_seq = echo.seq;
+
+        if (0u == pulses)
+        {
+            p_verdict = "NO ECHO PULSES -- check VCC, GND, TRIG/ECHO wiring";
+        }
+        else if (echo.width_us >= S5_ECHO_TIMEOUT_US)
+        {
+            p_verdict = "no reflection -- nothing in range";
+        }
+        else if (echo.width_us < 300u)
+        {
+            p_verdict = "instant echo -- something touching/blocking the "
+                        "sensor, or TRIG/ECHO wires touching";
+        }
+        else
+        {
+            p_verdict = "OK";
+        }
+
+        tm_printf((UB*)"[US] %3d cm   echo %5d us   %d pulses   %s\n",
+                  (INT)s5_get_obstacle_distance_cm(),
+                  (INT)echo.width_us, (INT)pulses, p_verdict);
+    }
+}
+
 EXPORT void subsystem5_test(void)
 {
     uint16_t mask;
@@ -179,6 +301,10 @@ EXPORT void subsystem5_test(void)
 
     /* ---- hands-on: the ultrasonic sees a hand ---- */
     range_check();
+
+    /* ---- hands-on: where is straight ahead, how far may it turn? ---- */
+    servo_centre_check();
+    servo_range_check();
 }
 
 #endif /* APP_TEST */

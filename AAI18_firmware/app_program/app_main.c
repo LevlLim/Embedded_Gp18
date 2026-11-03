@@ -195,6 +195,12 @@ EXPORT INT usermain(void)
        tests exercise the real tasks. */
     /* Let the boot calibration (3 s, Vehicle Controller) finish first,
        so the tests do not run on top of it. */
+    /* Ultrasonic bench test: nothing else, forever. */
+    if (6 == APP_TEST_BUDDY)
+    {
+        s5_ultrasonic_bench();
+    }
+
     /* Wait for the Controller to finish its boot calibration (READY or
        FAULT), up to 15 s.  A fixed 4 s wait was not always enough, and
        the tests then ran on top of the calibration. */

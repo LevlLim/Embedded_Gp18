@@ -41,6 +41,10 @@
 #include "../subsystem3/subsystem3.h"
 #include "../subsystem5/subsystem5.h"
 
+#ifndef S2_INNER_REVERSE_MAX_PCT        /* older subsystem2.h */
+#define S2_INNER_REVERSE_MAX_PCT (30)
+#endif
+
 #define S2_CMD_QUEUE_DEPTH  (4u)
 
 /* Control word fields: shift and width. */
@@ -73,11 +77,17 @@ static int32_t  distance_mm     = 0;
 
 static int32_t  prev_count_left  = 0;
 static int32_t  prev_count_right = 0;
-static int32_t  odometer_counts  = 0;   /* mean of both wheels, signed  */
+static int32_t  odometer_left    = 0;   /* counts, signed               */
+static int32_t  odometer_right   = 0;
 static uint32_t encoder_total    = 0u;  /* |left| + |right|, for FR9    */
 
 static int32_t  target_left   = 0;
 static int32_t  target_right  = 0;
+static int32_t  move_start_l  = 0;      /* counts at the start of a move */
+static int32_t  move_start_r  = 0;
+static int32_t  move_total_l  = 0;      /* counts the move needs, > 0    */
+static int32_t  move_total_r  = 0;
+static int32_t  bal_integral  = 0;      /* wheel balance, per mille.tick */
 static bool     b_window_one_wheel = false;    /* see check_encoders() */
 static uint32_t drive_start_us = 0u;    /* arms the stall detector      */
 
@@ -157,8 +167,11 @@ static void update_odometry(const gpio_irq_encoders_t *p_enc)
     speed_left_cps  = (delta_left  * 1000) / (int32_t)PERIOD_MOTION_MS;
     speed_right_cps = (delta_right * 1000) / (int32_t)PERIOD_MOTION_MS;
 
-    odometer_counts += (delta_left + delta_right) / 2;
-    distance_mm      = motor_counts_to_mm(odometer_counts);
+    /* Each wheel in its own units (they differ), then the mean. */
+    odometer_left  += delta_left;
+    odometer_right += delta_right;
+    distance_mm     = (motor_counts_to_mm(odometer_left, true)
+                       + motor_counts_to_mm(odometer_right, false)) / 2;
 
     /* Magnitudes; the casts are of non-negative values. */
     encoder_total += (uint32_t)((delta_left  < 0) ? -delta_left  : delta_left)
@@ -288,38 +301,41 @@ static bool take_command(msg_motion_cmd_t *p_cmd)
 static void begin_move(const msg_motion_cmd_t *p_cmd,
                        const gpio_irq_encoders_t *p_enc)
 {
-    int32_t counts = 0;
+    int32_t mm     = 0;     /* straight moves */
+    int32_t deg    = 0;     /* spin turns     */
+    int32_t counts_l;
+    int32_t counts_r;
     int8_t  dir_l  = 0;
     int8_t  dir_r  = 0;
 
     switch (p_cmd->type)
     {
         case MSG_CMD_FORWARD:
-            counts = motor_mm_to_counts((int32_t)p_cmd->arg);
+            mm     = (int32_t)p_cmd->arg;
             dir_l  = 1;
             dir_r  = 1;
         break;
 
         case MSG_CMD_REVERSE:
-            counts = motor_mm_to_counts((int32_t)p_cmd->arg);
+            mm     = (int32_t)p_cmd->arg;
             dir_l  = -1;
             dir_r  = -1;
         break;
 
         case MSG_CMD_TURN_L:
-            counts = motor_degrees_to_counts((int32_t)p_cmd->arg);
+            deg    = (int32_t)p_cmd->arg;
             dir_l  = -1;
             dir_r  = 1;
         break;
 
         case MSG_CMD_TURN_R:
-            counts = motor_degrees_to_counts((int32_t)p_cmd->arg);
+            deg    = (int32_t)p_cmd->arg;
             dir_l  = 1;
             dir_r  = -1;
         break;
 
         case MSG_CMD_U_TURN:
-            counts = motor_degrees_to_counts(180);
+            deg    = 180;
             dir_l  = 1;
             dir_r  = -1;
         break;
@@ -329,8 +345,18 @@ static void begin_move(const msg_motion_cmd_t *p_cmd,
         break;
     }
 
-    target_left  = p_enc->count_left  + ((int32_t)dir_l * counts);
-    target_right = p_enc->count_right + ((int32_t)dir_r * counts);
+    counts_l = (0 != deg) ? motor_degrees_to_counts(deg, true)
+                          : motor_mm_to_counts(mm, true);
+    counts_r = (0 != deg) ? motor_degrees_to_counts(deg, false)
+                          : motor_mm_to_counts(mm, false);
+
+    target_left  = p_enc->count_left  + ((int32_t)dir_l * counts_l);
+    target_right = p_enc->count_right + ((int32_t)dir_r * counts_r);
+    move_start_l = p_enc->count_left;
+    move_start_r = p_enc->count_right;
+    move_total_l = (counts_l > 0) ? counts_l : 1;
+    move_total_r = (counts_r > 0) ? counts_r : 1;
+    bal_integral = 0;
 
     put_dir(CTL_DIR_L_SHIFT, dir_l);
     put_dir(CTL_DIR_R_SHIFT, dir_r);
@@ -372,6 +398,81 @@ static int32_t filtered_err_x8 = 0;
 static volatile bool b_stop_on_line = false;   /* set by the Controller */
 static bool    b_last_valid    = false;
 
+/*
+ * Drive a measured move with the two wheels kept in step.  The two sides
+ * have different gearboxes (1260 vs 776 counts per revolution), so at
+ * the same duty they turn at different speeds: a "straight" leg curved
+ * and a turn swung round one wheel.  Compare how far through the move
+ * each wheel is (per mille of its own target) and take duty from the
+ * one that is ahead, giving it to the one behind.  A wheel that has
+ * reached its target stops while the other finishes.
+ */
+static void drive_balanced(const gpio_irq_encoders_t *p_enc, uint8_t duty)
+{
+    int32_t done_l = p_enc->count_left  - move_start_l;
+    int32_t done_r = p_enc->count_right - move_start_r;
+    int32_t prog_l;
+    int32_t prog_r;
+    int32_t trim;
+    int32_t limit = (int32_t)duty / 2;
+    int32_t duty_l;
+    int32_t duty_r;
+
+    done_l = (done_l < 0) ? -done_l : done_l;
+    done_r = (done_r < 0) ? -done_r : done_r;
+    prog_l = (done_l * 1000) / move_total_l;
+    prog_r = (done_r * 1000) / move_total_r;
+
+    /* Proportional + integral.  With P alone the faster wheel stayed
+       ~10 % ahead for the whole move (it needs a steady duty difference,
+       and P only gives one while there is an error); it then finished
+       first and stopped while the other caught up, swinging the car --
+       "fwd" curved right.  The integral builds that steady difference
+       up, so the progress error returns to zero. */
+    bal_integral += prog_l - prog_r;
+    if (bal_integral > (limit * S2_MOVE_BALANCE_I_DIV))
+    {
+        bal_integral = limit * S2_MOVE_BALANCE_I_DIV;
+    }
+    else if (bal_integral < (-limit * S2_MOVE_BALANCE_I_DIV))
+    {
+        bal_integral = -limit * S2_MOVE_BALANCE_I_DIV;
+    }
+    else
+    {
+        /* Within its range. */
+    }
+
+    trim = ((prog_l - prog_r) / S2_MOVE_BALANCE_DIV)
+         + (bal_integral / S2_MOVE_BALANCE_I_DIV);
+    trim = (trim > limit) ? limit : ((trim < -limit) ? -limit : trim);
+
+    duty_l = (int32_t)duty - trim;
+    duty_r = (int32_t)duty + trim;
+
+    /* Never slow a wheel below the duty it needs to keep turning: the
+       bench showed the faster (right) wheel cut to ~20 %, stalling, so
+       the car pivoted right in steps ("forward, right, forward, right").
+       Whatever a wheel cannot give up is added to the other instead. */
+    if (duty_l < (int32_t)S2_MIN_RUN_DUTY_PCT)
+    {
+        duty_r = duty_r + ((int32_t)S2_MIN_RUN_DUTY_PCT - duty_l);
+        duty_l = (int32_t)S2_MIN_RUN_DUTY_PCT;
+    }
+    if (duty_r < (int32_t)S2_MIN_RUN_DUTY_PCT)
+    {
+        duty_l = duty_l + ((int32_t)S2_MIN_RUN_DUTY_PCT - duty_r);
+        duty_r = (int32_t)S2_MIN_RUN_DUTY_PCT;
+    }
+
+    /* A wheel that has reached its target stops. */
+    duty_l = (prog_l >= 1000) ? 0 : duty_l;
+    duty_r = (prog_r >= 1000) ? 0 : duty_r;
+
+    motor_set(get_dir(CTL_DIR_L_SHIFT), motor_clamp_duty(duty_l),
+              get_dir(CTL_DIR_R_SHIFT), motor_clamp_duty(duty_r));
+}
+
 /* True if a fresh line reading says a sensor is over the line. */
 static bool line_in_view(void)
 {
@@ -383,10 +484,40 @@ static bool line_in_view(void)
         && (msg_line_age_ms(word, app_now_ms()) <= S2_LINE_STALE_MS))
     {
         msg_unpack_line(word, &line);
-        b_seen = line.b_valid && (MSG_LINE_TRACK == s3_get_line_state());
+        b_seen = line.b_valid && s3_line_seen();
     }
 
     return (b_seen);
+}
+
+/*
+ * Drive both wheels from SIGNED duties.  A negative duty runs that wheel
+ * BACKWARD (at most S2_INNER_REVERSE_MAX_PCT): when the steering
+ * correction is larger than the cruise duty, the inner wheel reverses and
+ * the car turns about a point between the wheels, far tighter than with
+ * the inner wheel merely stopped (bench: tight circle taken too wide).
+ */
+static void set_wheels_signed(int32_t left, int32_t right)
+{
+    int8_t dir_l = 1;
+    int8_t dir_r = 1;
+
+    if (left < 0)
+    {
+        dir_l = -1;
+        left  = -left;
+        left  = (left > S2_INNER_REVERSE_MAX_PCT) ? S2_INNER_REVERSE_MAX_PCT
+                                                  : left;
+    }
+    if (right < 0)
+    {
+        dir_r = -1;
+        right = -right;
+        right = (right > S2_INNER_REVERSE_MAX_PCT)
+              ? S2_INNER_REVERSE_MAX_PCT : right;
+    }
+
+    motor_set(dir_l, motor_clamp_duty(left), dir_r, motor_clamp_duty(right));
 }
 
 /*
@@ -447,8 +578,7 @@ static void step_line_pid(void)
             filtered_err_x8 += (((int32_t)line.error * 8) - filtered_err_x8)
                              / S2_ERR_FILTER_DIV;
             correction = motor_pid_step(0, filtered_err_x8 / 8, true);
-            motor_set(1, motor_clamp_duty(base - correction),
-                      1, motor_clamp_duty(base + correction));
+            set_wheels_signed(base - correction, base + correction);
         }
     }
     else
@@ -570,8 +700,7 @@ static uint8_t step_state(const gpio_irq_encoders_t *p_enc)
             else
             {
                 duty = get_move_duty();
-                motor_set(get_dir(CTL_DIR_L_SHIFT), duty,
-                          get_dir(CTL_DIR_R_SHIFT), duty);
+                drive_balanced(p_enc, duty);
                 check_encoders(p_enc);
             }
         break;

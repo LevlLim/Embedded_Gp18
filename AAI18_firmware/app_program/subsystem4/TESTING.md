@@ -52,6 +52,8 @@ Car flat and still at power-up (the IMU calibrates on boot).
 | `TIP THE CAR LEFT, THEN RIGHT (6 s)` | tilt it side to side |
 | `PASS: roll range a..b deg` | roll spread at least 20° |
 
+**Side ramp (one side of the car raised):** lifting the left or right wheels prints `[S4] side ramp start (roll+/roll-)`, then, when level again, `[S4] side ramp done: roll± side up, peak roll N deg -> H mm` (or `still raised` after 1.5 s). H = `S4_WHEEL_SPACING_MM` x sin(peak roll): set `S4_WHEEL_SPACING_MM` to the measured tyre-centre spacing. Check it by putting a block of known height under one side's wheels. While one side is raised, the `[DBG]` line shows the live height as `ramp Hmm` (0 when level). Turns are ignored: turning pushes the car sideways, which reads like a roll.
+
 Outside the self-test, every `[DBG]` line ends with `pitch N roll N` (and `IMU-FAULT` if the IMU is not calibrated), so you can watch both angles live in the normal firmware too.
 
 Also check the boot lines `[S4] IMU WHO_AM_I = …` and no `[S4] … config writes failed`.
@@ -71,3 +73,5 @@ These need the real track or instruments, so the self-test cannot do them:
 | Collision threshold / samples in a row | `S4_IMPACT_MILLI_G` / `S4_IMPACT_SAMPLES` | 2000 mg / 3 |
 | Tilt fault angle | `S4_TILT_FAULT_DEG` | 30° |
 | Hump start / level angle | `S4_HUMP_START_DEG` / `S4_HUMP_LEVEL_DEG` | 4° / 2° |
+| Wheel spacing for side-ramp height | `S4_WHEEL_SPACING_MM` | 130 mm (measure) |
+| Side ramp start / level roll | `S4_SIDE_START_DEG` / `S4_SIDE_LEVEL_DEG` | 5° / 2° (80 ms in a row) |

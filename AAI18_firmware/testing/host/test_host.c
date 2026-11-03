@@ -484,13 +484,15 @@ static void test_obstacle_profile(void)
     CHECK_EQ_INT(s5_lateral_cm(50u, -30), -25, "50 cm at -30 deg = -25 cm");
 
     /* A 25 cm-distant box from -10 to +10 degrees, a wall at 40 cm on the
-       far right (50..60 degrees), nothing else in range. */
+       far right (the last three steps), nothing else in range. */
+    /* Indices follow the configured scan arc (S5_SCAN_ARC_DEG). */
     memset(scan, 0, sizeof(scan));
-    for (idx = 10u; idx <= 14u; idx++)
+    for (idx = (uint32_t)((S5_FINE_ARC_DEG - 10) / S5_STEP_DEG);
+         idx <= (uint32_t)((S5_FINE_ARC_DEG + 10) / S5_STEP_DEG); idx++)
     {
         scan[idx] = 25u;
     }
-    for (idx = 22u; idx <= 24u; idx++)
+    for (idx = S5_FINE_STEPS - 3u; idx < S5_FINE_STEPS; idx++)
     {
         scan[idx] = 40u;
     }
@@ -500,11 +502,18 @@ static void test_obstacle_profile(void)
     CHECK_EQ_INT(profile.distance_cm, 25, "closest point 25 cm");
     CHECK_EQ_INT(profile.bearing_deg, -10, "bearing of closest point");
     CHECK_EQ_INT(profile.width_cm, 8, "width from the angular span");
+    CHECK_TRUE(profile.clear_left_cm > profile.clear_right_cm,
+               "open left side has more room than the walled right");
     CHECK_EQ_INT(profile.clear_left_cm, MSG_MAX_OBST_CLEAR,
-                 "open left side saturates at 31 cm");
-    CHECK_TRUE(profile.b_saturated, "saturation flagged");
-    CHECK_EQ_INT(profile.clear_right_cm, 26, "right side blocked by the wall");
-    CHECK_EQ_INT(profile.side, MSG_SIDE_LEFT, "bypass on the left");
+                 "left open to the scan edge counts as unlimited room");
+    CHECK_EQ_INT(profile.side, MSG_SIDE_LEFT, "bypass on the open left");
+
+    /* Object filling the whole scan: neither side is known to be open. */
+    memset(scan, 25u, sizeof(scan));
+    CHECK_TRUE(s5_build_profile(scan, S5_FINE_STEPS, 30u, &profile),
+               "wall-to-wall object profiled");
+    CHECK_EQ_INT(profile.side, MSG_SIDE_NONE,
+                 "object across the whole scan -> NONE (back off)");
 
     memset(scan, 0, sizeof(scan));
     CHECK_TRUE(!s5_build_profile(scan, S5_FINE_STEPS, 30u, &profile),
@@ -560,11 +569,17 @@ static void test_motor_maths(void)
     CHECK_EQ_INT(motor_clamp_duty(150), 100, "duty over 100 clamps to 100");
     CHECK_EQ_INT(motor_clamp_duty(42), 42, "in-range duty unchanged");
 
-    back_mm = motor_counts_to_mm(motor_mm_to_counts(1000));
-    CHECK_TRUE((back_mm > 950) && (back_mm <= 1000),
-               "1000 mm -> counts -> mm within one count");
-    CHECK_TRUE(motor_degrees_to_counts(180)
-               >= (2 * motor_degrees_to_counts(90)) - 1,
+    back_mm = motor_counts_to_mm(motor_mm_to_counts(1000, true), true);
+    CHECK_TRUE((back_mm > 990) && (back_mm <= 1000),
+               "left: 1000 mm -> counts -> mm round trip");
+    back_mm = motor_counts_to_mm(motor_mm_to_counts(1000, false), false);
+    CHECK_TRUE((back_mm > 990) && (back_mm <= 1000),
+               "right: 1000 mm -> counts -> mm round trip");
+    CHECK_TRUE(motor_mm_to_counts(1000, true)
+               > motor_mm_to_counts(1000, false),
+               "each wheel uses its own counts per revolution");
+    CHECK_TRUE(motor_degrees_to_counts(180, true)
+               >= (2 * motor_degrees_to_counts(90, true)) - 1,
                "180 deg turn is twice a 90 deg turn");
 
     /* Line PID is called as pid(0, line_error): a line to the RIGHT

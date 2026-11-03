@@ -26,12 +26,15 @@
  * and these must be set from logged ADC values across the lit and shadowed
  * parts of the real track.
  * --------------------------------------------------------------------- */
-/* SIDE SENSOR POSITION, seen from the back of the car.  The second line
-   sensor (GP26, ADC0 -- "L" in the calibration printout) sits beside the
-   centre one.  1 = on its RIGHT (this car), 0 = on its left.  Getting
-   this wrong steers the car AWAY from the line. */
-#define S3_SIDE_SENSOR_RIGHT    (1)
-#define S3_SIDE_SIGN            ((1 == S3_SIDE_SENSOR_RIGHT) ? 1 : -1)
+/* SENSOR LAYOUT: the two line sensors STRADDLE the line, one just
+   outside each edge, seen from the back of the car.  Both read WHITE when
+   the car is centred; one reads black when the car drifts; BOTH read
+   black at a junction (cross or T), which is where a barcode's turn is
+   carried out.  0 = GP26 (ADC0) is the LEFT sensor and GP27 (ADC1) the
+   RIGHT one (this car).  1 = the other way round. */
+#define S3_SWAP_SIDES           (0)
+#define S3_CH_LEFT              ((0 == S3_SWAP_SIDES) ? 0u : 1u)
+#define S3_CH_RIGHT             ((0 == S3_SWAP_SIDES) ? 1u : 0u)
 
 #define S3_ADC_MAX              (4095u)
 /* NOTHING UNDER THE SENSOR.  Lifted off the surface, these IR sensors
@@ -47,31 +50,57 @@
 #define S3_HYSTERESIS           (200u)  /* PROVISIONAL: max full band     */
 #define S3_MIN_CONTRAST         (400u)  /* PROVISIONAL: black - white     */
 
-/* The two line sensors are NOT matched on this car (measured on the
-   floor): centre ~145 white / ~1000+ black, side ~200 white / ~400 black.
-   So each channel gets its own threshold AND its own hysteresis band
-   (a quarter of its contrast, at most S3_HYSTERESIS), and a sweep counts
-   for a channel once it spans S3_MIN_SWEEP_CONTRAST.  (Both sensors now
-   give 1000+ counts of contrast; sitting still on black the centre
-   reading wanders ~120, which must NOT count as a sweep.) */
-#define S3_MIN_SWEEP_CONTRAST   (400u)  /* 120 took black NOISE for a sweep */
+/* The two line sensors are NOT matched on this car, so each channel
+   gets its own threshold and hysteresis band (a quarter of its contrast,
+   at most S3_HYSTERESIS).  A channel counts as SWEPT once its readings
+   span S3_MIN_SWEEP_CONTRAST: threshold = midpoint of its white and
+   black.  A channel that never saw the line during calibration gets
+   white + S3_STATIC_OFFSET (measured: white ~150, black 1000-1700). */
+#define S3_MIN_SWEEP_CONTRAST   (400u)
 #define S3_MIN_BAND             (20u)   /* hysteresis never below this    */
-/* Static calibration never sees the side sensor on black: its threshold
-   is its white reading plus this.  Measured after the sensor was lowered:
-   side ~150 white, ~1000-1700 black, so +400 sits well clear of white
-   (a sensor just at the line's EDGE no longer reads as "on the line")
-   and well below black.  A sweep during calibration is still better. */
-#define S3_SIDE_STATIC_OFFSET   (400u)
+#define S3_STATIC_OFFSET        (400u)
 
-/* EDGE STEERING on the side WITHOUT a sensor.  With the line under the
-   centre sensor only, the centre reading falls from its full-black level
-   as the sensor slides toward the line's edge.  If the side sensor is
-   still white, the car is sliding toward the blind side, so steer back
-   in proportion: up to S3_EDGE_MAX_ERROR (of 63) when the reading has
-   fallen to the threshold.  Measured on the car: the line was always
-   lost on the blind side with no warning before this. */
-#define S3_EDGE_MAX_ERROR       (40)
-#define S3_LOST_DEBOUNCE        (4u)    /* 4 x 5 ms = 20 ms of all-white  */
+/* STEERING.  One sensor on black: steer toward it, from S3_ERR_MIN (just
+   over its threshold) to S3_ERR_MAX (full black: the line is right under
+   it).  Error range is +-63.  These sensors SWITCH (white ~150 jumps to
+   1000+ within a millimetre), so the reading just over the threshold is
+   already "on the line": keep these gentle or the car overshoots. */
+#define S3_ERR_MIN              (10)
+#define S3_ERR_MAX              (20)
+
+/* LOST.  With straddling sensors "both white" also happens when the line
+   has slid right past one sensor and out the far side.  Taken as LOST
+   when a sensor had been on black for at least S3_OUTWARD_MS before it
+   went white (steering toward it had not brought the line back in: a
+   sharp curve), so the car keeps turning that way until a sensor sees the
+   line again.  Shorter dark spells are ordinary corrections. */
+#define S3_OUTWARD_MS           (350u)
+
+/* BOTH WHITE after a short touch: steer gently toward the sensor that saw
+   the line last (S3_SEEK_ERROR, of 63) -- the car weaves slowly between
+   the two sensors on a straight, but cannot drive off with the line
+   outside them.  All white for S3_WHITE_LOST_MS: LOST, turn toward it. */
+#define S3_SEEK_ERROR           (0)
+
+/* CURVE BOOST: each repeated touch on the SAME side (a steady curve) adds
+   S3_CURVE_STEP to the steering, up to S3_CURVE_MAX; a touch on the
+   other side (a straight) clears it. */
+#define S3_CURVE_STEP           (10)
+#define S3_CURVE_MAX            (30)
+#define S3_WHITE_LOST_MS        (600u)
+
+/* JUNCTION: both sensors black for S3_JUNCTION_SAMPLES in a row (x 5 ms).
+   A SHARP CORNER looks the same (both sensors cross the bend together), so
+   while both are black the car keeps its previous steering IF one sensor
+   had already been on black for S3_CORNER_MS (a corner); otherwise it
+   was a crossing met at an angle, and the car goes straight across. */
+#define S3_CORNER_MS            (200u)
+/* Junction reporting: once per junction; re-armed after both have been
+   white for S3_JUNCTION_CLEAR_SAMPLES.  A branch on ONE side only cannot
+   be told apart from the car drifting, so it is not reported. */
+#define S3_JUNCTION_SAMPLES     (3u)
+#define S3_JUNCTION_CLEAR_SAMPLES (20u)
+#define S3_LOST_DEBOUNCE        (4u)    /* 4 x 5 ms = 20 ms of LOST        */
 
 /* Barcode geometry.  Bars are classified by RELATIVE width against the
    narrowest bar in the symbol, so a change in vehicle speed does not
@@ -115,8 +144,24 @@ bool s3_take_barcode(msg_barcode_t *p_bc);
 /* Last successfully decoded command, for telemetry (msg_barcode_cmd_t). */
 uint8_t s3_get_last_barcode(void);
 
-/* Current line thresholds (side = GP26, centre = GP27), diagnostics. */
-void s3_get_thresholds(uint16_t *p_side, uint16_t *p_centre);
+/* Current line thresholds (left and right sensor), diagnostics. */
+void s3_get_thresholds(uint16_t *p_left, uint16_t *p_right);
+
+/* True while either sensor is on black.  With straddling sensors "TRACK"
+   also means "both white", so code looking FOR the line (search turns,
+   the bypass return leg) must use this instead. */
+bool s3_line_seen(void);
+
+/* Controller: a STRAIGHT barcode is waiting, so the next time both sensors
+   go black go straight across, even if the car was turning (it would
+   otherwise be taken as a corner).  Clears itself at that junction. */
+void s3_force_straight(bool b_on);
+
+/* Junctions seen since START (diagnostics). */
+uint16_t s3_get_junction_count(void);
+
+/* Barcode channel threshold (diagnostics). */
+uint16_t s3_get_barcode_threshold(void);
 
 /* Set the barcode channel threshold (from calibration). */
 void s3_set_barcode_threshold(uint16_t threshold);

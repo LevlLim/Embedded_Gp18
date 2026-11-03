@@ -91,7 +91,7 @@
 
 #define LWIP_DEBUG                  0
 
-/* Group AAI18: room for several car18/log text lines (up to 120 bytes
+/* Group AAI18: room for several car18/log text lines (up to 160 bytes
  * each) queued in one outbox drain; lwIP's default is 256 bytes. */
 #define MQTT_OUTPUT_RINGBUF_SIZE    1024
 

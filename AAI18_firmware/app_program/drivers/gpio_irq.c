@@ -219,8 +219,10 @@ EXPORT void gpio_irq_read_encoders(gpio_irq_encoders_t *p_out)
      * which is acceptable even in the 10 ms Motion Control path.
      */
     DI(imask);
-    p_out->count_left   = encoders.count_left;
-    p_out->count_right  = encoders.count_right;
+    p_out->count_left   = (1 == ENC_LEFT_REVERSED)
+                        ? -encoders.count_left : encoders.count_left;
+    p_out->count_right  = (1 == ENC_RIGHT_REVERSED)
+                        ? -encoders.count_right : encoders.count_right;
     p_out->edges_left   = encoders.edges_left;
     p_out->edges_right  = encoders.edges_right;
     p_out->last_edge_us = encoders.last_edge_us;

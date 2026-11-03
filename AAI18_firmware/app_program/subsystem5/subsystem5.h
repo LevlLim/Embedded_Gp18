@@ -41,7 +41,10 @@
 #define S5_EVT_REMOTE_STOP      (0x0040u)
 #define S5_EVT_RESET            (0x0080u)
 #define S5_EVT_OBSTACLE_SEEN    (0x0100u)   /* inside D_detect: stop     */
-#define S5_EVT_ALL              (0x01FFu)
+#define S5_EVT_MANUAL           (0x0200u)   /* calibration move request  */
+#define S5_EVT_JUNCTION         (0x0400u)   /* both line sensors black   */
+#define S5_EVT_TEST_TURN        (0x0800u)   /* jleft/jright over MQTT    */
+#define S5_EVT_ALL              (0x0FFFu)
 
 /* System-level states.  Packed as 3-bit parent + 2-bit substate. */
 typedef enum
@@ -86,22 +89,43 @@ typedef enum
    sweep was pulling the sensor's wires off the servo).  The car still
    stops for anything ahead, but cannot profile it: it waits, stopped,
    until the path is clear, then carries on.  0 restores the sweep. */
-#define S5_SERVO_FIXED          (1)
+#define S5_SERVO_FIXED          (0)     /* sweep on: arc limited below */
 #define S5_SERVO_CENTRE_US      (1500u)
+/* SERVO TRIM: the horn is not fitted dead straight, so at the servo's
+   own centre the sensor points slightly to one side.  This many degrees
+   are added to every servo command (+ = right) so that angle 0 really is
+   straight ahead.  Find it with the "SERVO CENTRE" step in the Buddy 5
+   self-test: the printed angle at which the sensor faces straight ahead.
+   Measured on the car. */
+#define S5_SERVO_TRIM_DEG       (-6)    /* measured: straight at raw -6 */
 #define S5_SERVO_US_PER_DEG     (11u)   /* ~1000 us over 90 degrees      */
-#define S5_SERVO_LIMIT_DEG      (60)
-#define S5_SETTLE_TICKS         (4u)    /* x 60 ms = 240 ms, A6          */
-#define S5_COARSE_ARC_DEG       (30)    /* bounded forward arc, risk R6  */
-#define S5_FINE_ARC_DEG         (60)    /* profiling arc, car stopped    */
+/* SCAN ARC: how far the servo may turn each way, in degrees.  The
+   sensor's wires limit it on this car, so MEASURE it: the Buddy 5
+   self-test (test-b5) steps the servo out 5 degrees at a time and
+   prints each angle -- set this to the largest angle (multiple of 5)
+   reached on BOTH sides without the wires pulling.  Everything below
+   follows from it.  PROVISIONAL until measured. */
+#define S5_SCAN_ARC_DEG         (30)    /* raw limit 40 each side; with */
+                                        /* the -6 trim that is 34 left, */
+                                        /* 46 right -> 30 both          */
 #define S5_STEP_DEG             (5)
-#define S5_FINE_STEPS           (25u)   /* -60..+60 in 5 degree steps    */
+#define S5_SERVO_LIMIT_DEG      (S5_SCAN_ARC_DEG)   /* hard clamp        */
+#define S5_FINE_ARC_DEG         (S5_SCAN_ARC_DEG)   /* car stopped       */
+#define S5_COARSE_ARC_DEG       (((S5_SCAN_ARC_DEG / 2) / S5_STEP_DEG) \
+                                 * S5_STEP_DEG)     /* while driving     */
+#define S5_FINE_STEPS           ((uint32_t)(((2 * S5_FINE_ARC_DEG)     \
+                                             / S5_STEP_DEG) + 1))
+#define S5_SETTLE_TICKS         (4u)    /* x 60 ms = 240 ms, A6          */
+MSG_STATIC_ASSERT((S5_SCAN_ARC_DEG % S5_STEP_DEG) == 0, arc_whole_steps);
+MSG_STATIC_ASSERT((S5_SCAN_ARC_DEG >= 10) && (S5_SCAN_ARC_DEG <= 60),
+                  arc_in_range);
 /* HC-SR04P readings are noisy: one stray echo (the floor, a cable, a
    reflection) must not stop the car.  A stop or detection needs this
    many readings in a row (x 60 ms), and anything under S5_MIN_VALID_CM is
    treated as no reading (the sensor's own blind zone). */
 #define S5_CONFIRM_PINGS        (2u)
 #define S5_START_GRACE_MS       (800u)  /* ignore the START-pressing hand */
-#define S5_MIN_VALID_CM         (5u)    /* 3 cm ghost echoes stopped the car */
+#define S5_MIN_VALID_CM         (10u)    /* 3 cm ghost echoes stopped the car */
 #define S5_DSTOP_ARC_DEG        (15)    /* D_stop only counts ahead      */
 #define S5_OBJECT_DEPTH_TOL_CM  (10u)   /* same object if within this    */
 #define S5_CLEAR_RANGE_CM       (50u)   /* free if nothing nearer        */
@@ -110,6 +134,10 @@ typedef enum
 #define S5_NO_ECHO_LIMIT        (10u)   /* consecutive missing pulses    */
 #define S5_ROBOT_WIDTH_CM       (18u)
 #define S5_ROBOT_LENGTH_CM      (20u)
+/* MEASURE: distance from the line sensors back to the wheel axle, mm.
+   At a junction the sensors reach the cross line first; the car drives
+   on this far so it turns about the junction itself.  PROVISIONAL. */
+#define S5_SENSOR_TO_AXLE_MM    (60u)
 #define S5_CLEARANCE_MARGIN_CM  (5u)
 #define S5_SEARCH_TIMEOUT_MS    (5000u) /* FR8: reacquire within 5 s     */
 #define S5_REVERSE_MM           (100u)
@@ -117,9 +145,31 @@ typedef enum
 /* Post an event to the Vehicle Controller.  Safe from any task. */
 void s5_post_event(uint32_t event_bits);
 
+/* CALIBRATION MOVES from the laptop (MQTT text "left", "right", "fwd",
+   "back").  Carried out only while the car is parked (READY or STOPPED);
+   ignored while driving.  For checking turn angles (S2_TRACK_WIDTH_MM)
+   and distances (S2_WHEEL_DIAM_MM) without driving the course. */
+#define S5_MANUAL_TURN_DEG      (90u)
+#define S5_MANUAL_FWD_MM        (500u)
+#define S5_MANUAL_BACK_MM       (200u)
+void s5_manual_move(msg_cmd_type_t type, uint32_t arg);
+
 /* Current mission state, already encoded (msg_encode_veh_state).  One
    byte written only by the Controller: safe from any task or core. */
 uint8_t s5_get_encoded_state(void);
+
+#if APP_TEST
+/* Self-test only: point the servo at any angle (+ = right), ignoring
+   S5_SERVO_FIXED and the scan-arc clamp (limited to +-80).  "point"
+   includes S5_SERVO_TRIM_DEG (0 = straight ahead); "raw" does not
+   (0 = the servo's own centre), for finding the trim. */
+void s5_servo_test_point(int32_t angle_deg);
+void s5_servo_test_raw(int32_t angle_deg);
+
+/* Ultrasonic bench test (TEST_BUDDY=6 / preset test-us): servo straight,
+   prints the sensor's reading 4 times a second, never returns. */
+void s5_ultrasonic_bench(void);
+#endif
 
 /* True while the mission is RUNNING. */
 bool s5_is_running(void);
@@ -131,6 +181,15 @@ bool s5_is_initialised(void);
 /* Latest forward distance in cm (0 = nothing in range), for telemetry.
    One byte, written only by Obstacle Scan. */
 uint8_t s5_get_obstacle_distance_cm(void);
+
+/* Where the scan servo points now, degrees from straight ahead (+ right,
+   trim excluded).  For the debug line. */
+int32_t s5_get_servo_angle(void);
+
+/* Testing without a printed barcode: store a junction command
+   (msg_barcode_cmd_t) exactly as if a barcode had been read.  From the
+   MQTT text commands jleft / jright / jstraight / juturn. */
+void s5_inject_turn(uint8_t cmd);
 
 /* Controller -> Obstacle Scan. */
 void s5_obstacle_request(s5_request_t req);

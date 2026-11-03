@@ -138,7 +138,13 @@ To read the car's console without a USB cable:
 4. Build the **`mqtt`** preset and flash its `.uf2`.
 5. Read the console: `mosquitto_sub -h localhost -t car18/log`
    (every `[DBG]`, `[S3]`, `[S4]`, `[S5]` line, as on the USB console).
-   Binary telemetry is on `car18/tele/#`; commands go to `car18/cmd`.
+   Binary telemetry is on `car18/tele/#`.
+6. Control the car from the laptop:
+   `mosquitto_pub -h <broker> -t car18/cmd -m start` (or `stop`, `reset`).
+   The 2-byte binary form `[seq][cmd]` (CR1) is still accepted.
+   Calibration moves while parked: `left` / `right` (90° turn), `fwd`
+   (500 mm), `back` (200 mm) -- check turns against `S2_TRACK_WIDTH_MM`
+   and distances against `S2_WHEEL_DIAM_MM`.
 
 ### `template_patches/` — template files this project changes or adds
 
@@ -290,7 +296,7 @@ declared `extern` in a header (4.2c, 7.1j).
 4. **Servo may face away when an obstacle appears** (risk R6).
 5. **Encoder ISR cost unknown** (risk R8); `gpio_irq_max_duration_us()`.
 6. **Quadrature counts one channel only** (half resolution).
-7. **`S2_COUNTS_PER_REV = 20` is a placeholder.**
+7. **Counts per revolution measured (left 1260, right 776); wheel diameter and track width still nominal.** The two sides differ consistently -- check both motors are the same model.
 8. **No closed-loop wheel-speed PID yet (NFR1).** Moves run at a fixed
    duty; the PID only steers in line following.
 9. **MQTT path never run against a broker.** It compiles and links with

@@ -295,6 +295,11 @@ EXPORT uint8_t s3_get_last_barcode(void)
     return (last_barcode);
 }
 
+EXPORT uint16_t s3_get_barcode_threshold(void)
+{
+    return (threshold_barcode);
+}
+
 EXPORT void s3_set_barcode_threshold(uint16_t threshold)
 {
     threshold_barcode = threshold;

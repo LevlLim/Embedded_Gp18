@@ -37,8 +37,8 @@ static void check_decode(uint16_t width_a, uint16_t width_b,
  */
 static void sweep_check(void)
 {
-    adc_sample_t side   = {0};
-    adc_sample_t centre = {0};
+    adc_sample_t side   = {0};   /* left sensor  */
+    adc_sample_t centre = {0};   /* right sensor */
     uint16_t     thr_side;
     uint16_t     thr_ctr;
     bool         b_side_b = false;
@@ -53,24 +53,24 @@ static void sweep_check(void)
     for (tick = 0u; tick < 24u; tick++)
     {
         (void)tk_dly_tsk(250);
-        (void)adc_sampler_read(ADC_CH_LINE_L, &side);
-        (void)adc_sampler_read(ADC_CH_LINE_C, &centre);
+        (void)adc_sampler_read(S3_CH_LEFT, &side);
+        (void)adc_sampler_read(S3_CH_RIGHT, &centre);
 
         b_side_b = b_side_b || (side.value > thr_side);
         b_side_w = b_side_w || (side.value <= thr_side);
         b_ctr_b  = b_ctr_b  || (centre.value > thr_ctr);
         b_ctr_w  = b_ctr_w  || (centre.value <= thr_ctr);
 
-        tm_printf((UB*)"[TEST-S3]   side %4d/%4d %s   centre %4d/%4d %s\n",
+        tm_printf((UB*)"[TEST-S3]   left %4d/%4d %s   right %4d/%4d %s\n",
                   (INT)side.value, (INT)thr_side,
                   (side.value > thr_side) ? "B" : "W",
                   (INT)centre.value, (INT)thr_ctr,
                   (centre.value > thr_ctr) ? "B" : "W");
     }
 
-    tm_printf((UB*)"[TEST-S3] %s: side sensor saw black and white\n",
+    tm_printf((UB*)"[TEST-S3] %s: LEFT sensor saw black and white\n",
               (b_side_b && b_side_w) ? "PASS" : "FAIL");
-    tm_printf((UB*)"[TEST-S3] %s: centre sensor saw black and white\n",
+    tm_printf((UB*)"[TEST-S3] %s: RIGHT sensor saw black and white\n",
               (b_ctr_b && b_ctr_w) ? "PASS" : "FAIL");
 }
 

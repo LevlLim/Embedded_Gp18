@@ -58,16 +58,42 @@
 
 /* Thresholds.  ALL PROVISIONAL -- assumptions A7 and A8 are open and
    these must be set from logged data, not guessed at. */
-#define S4_IMPACT_MILLI_G       (2000)  /* 2 g horizontal jolt, A8       */
+#define S4_IMPACT_MILLI_G       (2000)  /* 2 g fore-aft jolt, A8         */
 #define S4_IMPACT_SAMPLES       (3u)    /* in a row: 7.5 ms at 400 Hz    */
 #define S4_TILT_FAULT_DEG       (30)    /* sustained lean = tipped over  */
+#define S4_TILT_FILTER_DIV      (4)     /* ~40 ms smoothing of the angles */
+
+/* IMU MOUNTING.  The firmware assumes the chip's X axis points to the
+   car's FRONT (pitch) and Y to its SIDE (roll).  If lifting one SIDE of
+   the car changes "pitch" instead of "roll", the chip is turned 90
+   degrees: set S4_IMU_SWAP_XY to 1.  If an angle has the wrong sign
+   (pitch negative with the nose UP), set its INVERT to 1. */
+#define S4_IMU_SWAP_XY          (1)
+#define S4_IMU_INVERT_PITCH     (1)
+#define S4_IMU_INVERT_ROLL      (0)
 #define S4_HUMP_START_DEG       (4)     /* nose-up that opens a hump     */
 #define S4_HUMP_LEVEL_DEG       (2)     /* back to level                 */
 #define S4_DEBOUNCE_SAMPLES     (3)     /* A7: n_deb                     */
+
+/* SIDE RAMP: only the left or the right wheels go up, so the car ROLLS.
+   With one side on the floor, the raised side's height is
+       wheel spacing x sin(roll)
+   No distance is needed.  A side ramp starts at S4_SIDE_START_DEG of
+   roll (for S4_DEBOUNCE_SAMPLES readings) and ends when the roll is back
+   under S4_SIDE_LEVEL_DEG; the PEAK roll gives the height.  If the car is
+   still raised after S4_SIDE_REPORT_MS it is reported then too (a ramp
+   that ends raised).  S4_WHEEL_SPACING_MM is the PHYSICAL distance
+   between the tyre centres -- measure it with a ruler (not
+   S2_TRACK_WIDTH_MM, which is tuned for turning).  PROVISIONAL. */
+#define S4_WHEEL_SPACING_MM     (130)
+#define S4_SIDE_START_DEG       (5)
+#define S4_SIDE_LEVEL_DEG       (2)
+#define S4_SIDE_DEBOUNCE        (8u)    /* readings in a row (80 ms)     */
+#define S4_SIDE_REPORT_MS       (1500u)
 #define S4_HUMP_TIMEOUT_MS      (4000u) /* a hump that never ends        */
 #define S4_IMU_FAIL_LIMIT       (3u)    /* consecutive I2C errors        */
 #define S4_CAL_SAMPLES          (64u)   /* averaged for the offsets      */
-#define S4_CAL_MAX_SPREAD_MG    (60)    /* more movement = not held still*/
+#define S4_CAL_MAX_WOBBLE_MG    (30)    /* mean |deviation|: more = moved*/
 #define S4_CAL_WINDOW_MS        (6000u) /* keep retrying at boot this long */
 
 typedef enum
@@ -93,6 +119,15 @@ int8_t     s4_get_tilt_deg(void);
 /* Side-to-side tilt (roll), degrees, from the Y axis.  Which side is +
    depends on how the IMU is mounted: check it with the [DBG] line. */
 int8_t     s4_get_roll_deg(void);
+
+/* Last side-ramp result: height of the raised side in mm (0 = none yet)
+   and which side went up (+1 = roll positive, -1 = negative). */
+uint16_t   s4_get_side_height_mm(void);
+
+/* LIVE height of the raised side while a side ramp is in progress, mm;
+   0 when the car is level (for the [DBG] line). */
+uint16_t   s4_get_side_live_mm(void);
+int8_t     s4_get_side_sign(void);
 
 /* Identify + configure the IMU (subsystem4.c).  True if it answered and
    every register write succeeded. */
