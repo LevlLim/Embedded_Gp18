@@ -79,6 +79,7 @@
 #define PIN_MOTOR_R_A       (10u)   /* S2  PWM slice 5 channel A         */
 #define PIN_MOTOR_R_B       (11u)   /* S2  PWM slice 5 channel B         */
 #define PIN_SERVO_SCAN      (12u)   /* S5  PWM slice 6, 50 Hz            */
+#define PIN_SERVO_BARCODE   (14u)   /* S4  PWM slice 7 A, barcode lift   */
 #define PIN_IMU_SDA         (16u)   /* S4  I2C0 SDA                      */
 #define PIN_IMU_SCL         (17u)   /* S4  I2C0 SCL                      */
 #define PIN_STATUS_LED      (18u)   /* S5  WS2812 status LED             */

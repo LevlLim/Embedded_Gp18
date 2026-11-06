@@ -86,6 +86,11 @@
    between the tyre centres -- measure it with a ruler (not
    S2_TRACK_WIDTH_MM, which is tuned for turning).  PROVISIONAL. */
 #define S4_WHEEL_SPACING_MM     (130)
+#define S4_LIFT_DOWN_DEG        (-180)     /* sensor just above the track   */
+#define S4_LIFT_UP_DEG          (0)    /* clear of the ramp             */
+#define S4_LIFT_START_DEG       (8)     /* lift at this pitch or roll    */
+#define S4_LIFT_LEVEL_DEG       (2)     /* lower once both are under ... */
+#define S4_LIFT_LOWER_MS        (500u)  /* ... for this long             */
 #define S4_SIDE_START_DEG       (5)
 #define S4_SIDE_LEVEL_DEG       (2)
 #define S4_SIDE_DEBOUNCE        (8u)    /* readings in a row (80 ms)     */
@@ -154,6 +159,11 @@ int8_t  s4_pitch_deg(int32_t ax_mg, int32_t az_mg);
 
 /* The task body.  Private to subsystem 4. */
 void imu_task(INT stacd, void *p_exinf);
+
+/* Barcode sensor lift (barcode_lift.c). */
+void s4_lift_init(void);
+void s4_lift_step(bool b_running, uint32_t period_ms);
+bool s4_barcode_lifted(void);       /* true: ignore the barcode IR */
 
 #endif /* SUBSYSTEM4_H */
 

@@ -773,6 +773,7 @@ EXPORT void imu_task(INT stacd, void *p_exinf)
         (void)app_wait_period();
 
         apply_reset_request();
+        s4_lift_step(b_active, PERIOD_IMU_MS);
 
         count = read_fifo(buf, S4_FIFO_MAX_READ);
 

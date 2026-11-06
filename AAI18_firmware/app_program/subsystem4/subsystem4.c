@@ -80,6 +80,8 @@ EXPORT ER subsystem4_init(void)
 {
     ER ercd;
 
+    s4_lift_init(); 
+    
     ercd = i2c0_init();
     if (ercd < E_OK)
     {
