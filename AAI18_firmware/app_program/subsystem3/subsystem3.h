@@ -66,6 +66,7 @@
    1000+ within a millimetre), so the reading just over the threshold is
    already "on the line": keep these gentle or the car overshoots. */
 #define S3_ERR_MIN              (10)
+#define S3_HOLD_MS              (0)
 #define S3_ERR_MAX              (20)
 
 /* LOST.  With straddling sensors "both white" also happens when the line
@@ -85,8 +86,8 @@
 /* CURVE BOOST: each repeated touch on the SAME side (a steady curve) adds
    S3_CURVE_STEP to the steering, up to S3_CURVE_MAX; a touch on the
    other side (a straight) clears it. */
-#define S3_CURVE_STEP           (10)
-#define S3_CURVE_MAX            (30)
+#define S3_CURVE_STEP           (20)
+#define S3_CURVE_MAX            (40)
 #define S3_WHITE_LOST_MS        (600u)
 
 /* JUNCTION: both sensors black for S3_JUNCTION_SAMPLES in a row (x 5 ms).
@@ -162,6 +163,8 @@ uint16_t s3_get_junction_count(void);
 
 /* Barcode channel threshold (diagnostics). */
 uint16_t s3_get_barcode_threshold(void);
+
+bool s3_barcode_reading(void);
 
 /* Set the barcode channel threshold (from calibration). */
 void s3_set_barcode_threshold(uint16_t threshold);

@@ -79,7 +79,6 @@
 #define PIN_MOTOR_R_A       (10u)   /* S2  PWM slice 5 channel A         */
 #define PIN_MOTOR_R_B       (11u)   /* S2  PWM slice 5 channel B         */
 #define PIN_SERVO_SCAN      (12u)   /* S5  PWM slice 6, 50 Hz            */
-#define PIN_SERVO_BARCODE   (14u)   /* S4  PWM slice 7 A, barcode lift   */
 #define PIN_IMU_SDA         (16u)   /* S4  I2C0 SDA                      */
 #define PIN_IMU_SCL         (17u)   /* S4  I2C0 SCL                      */
 #define PIN_STATUS_LED      (18u)   /* S5  WS2812 status LED             */
@@ -131,8 +130,8 @@
  * --------------------------------------------------------------------- */
 #define PROV_D_DETECT_CM    (30u)   /* FR6  obstacle detection distance  */
 #define PROV_D_STOP_CM      (20u)   /* NFR2 hard stop distance           */
-#define PROV_CRUISE_PCT     (24u)   /* nominal cruising speed, % duty    */
-#define PROV_DEGRADE_PCT    (24u)   /* speed cap when a DEGRADE fault is */
+#define PROV_CRUISE_PCT     (21u)   /* nominal cruising speed, % duty    */
+#define PROV_DEGRADE_PCT    (21u)   /* speed cap when a DEGRADE fault is */
                                     /* active (e.g. IMU_FAULT)           */
 
 /* ---------------------------------------------------------------------

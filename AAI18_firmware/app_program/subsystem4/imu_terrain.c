@@ -1,14 +1,13 @@
 /*
  * imu_terrain.c
  *
- * Subsystem 4 -- IMU task: calibration, hump sequence, collision, tilt.
+ * Subsystem 4 -- IMU task: calibration, hump sequence, tilt, lift stop.
  *
  * Runs every 10 ms with a 4 ms worst-case budget (NFR11).  Each cycle it
  * DRAINS the accelerometer FIFO (about 4 samples at 400 Hz): every sample
- * is checked for an impact, so a jolt between ticks is not missed, and
- * the newest one gives the tilt.  Previously one register read per cycle
- * popped only the OLDEST of 32 queued samples, so the data was ~80 ms old
- * against NFR10's 25 ms.
+ * goes through the lift check, and the newest one gives the tilt.
+ * Previously one register read per cycle popped only the OLDEST of 32
+ * queued samples, so the data was ~80 ms old against NFR10's 25 ms.
  *
  * SINGLE WRITER: all private state below is written by imu_task alone.
  * The Controller's requests (activate, reset) arrive as flags that this
@@ -38,8 +37,13 @@ static volatile int8_t     roll_deg      = 0;   /* roll: side to side    */
 static int32_t  pitch_x8 = 0;                   /* filter state, x 8    */
 
 /* Side ramp (roll) state.  Written by imu_task only. */
-static volatile uint16_t side_height_mm = 0u;   /* last result          */
-static volatile int8_t   side_sign      = 0;
+/* Last side ramp (CR1 item 6): ONE word, bits 0-7 = height mm
+   (saturated at 255), bits 8-9 = side (0 none, 1 roll+, 2 roll-). */
+#define S4_SIDE_MM_MAX          (255u)
+#define S4_SIDE_MM_MASK         (0x00FFu)
+#define S4_SIDE_UP_POS          (0x0100u)   /* roll+ side up */
+#define S4_SIDE_UP_NEG          (0x0200u)   /* roll- side up */
+static volatile uint16_t side_word      = 0u;
 static bool     b_side_active  = false;
 static bool     b_side_reported = false;
 static uint8_t  side_debounce  = 0u;
@@ -63,7 +67,7 @@ static uint32_t peak_mm        = 0u;
 static uint8_t  consecutive_fail = 0u;
 
 /* Calibration result.  Without offsets the tilt is wrong by however the
-   chip sits, so tilt / collision E-STOPs are only raised once calibrated
+   chip sits, so tilt / lift E-STOPs are only raised once calibrated
    (bench log: an uncalibrated IMU raised TILT 37 deg on a flat floor). */
 static bool     b_calibrated  = false;
 static uint32_t cal_samples   = 0u;
@@ -71,11 +75,17 @@ static int32_t  cal_spread_mg = 0;
 static int32_t  cal_wobble_mg = 0;           /* mean |deviation|        */
 static int16_t  cal_x[S4_CAL_SAMPLES];      /* raw X samples, one pass */
 
-/* Impact debounce: samples in a row over the threshold, carried across
-   batches, and the strongest one seen in the current run of them. */
-static uint8_t  impact_run    = 0u;
-static int32_t  impact_peak_x = 0;
-static int32_t  impact_peak_y = 0;
+/* Lift stop.  rest_z_mg: Z at calibration (car flat on the floor).
+   lift_z_mg: smoothed Z.  lift_run: samples in a row off rest, carried
+   across batches.  lift_peak_mg: largest smoothed offset this run,
+   printed afterwards so S4_LIFT_MG can be set from real driving. */
+#define S4_LIFT_SAMPLES   ((S4_LIFT_MS * 400u) / 1000u)  /* 400 Hz ODR */
+static int32_t  rest_z_mg     = 1000;
+static int32_t  lift_z_mg     = 0;
+static bool     b_lift_primed = false;
+static uint16_t lift_run      = 0u;
+static int32_t  lift_peak_mg  = 0;
+static bool     b_was_active  = false;
 
 /*
  * sin(x) in Q8 for 0..45 degrees, one entry per degree.  Beyond 45 degrees
@@ -161,6 +171,7 @@ static bool calibrate(void)
     uint8_t  buf[S4_BYTES_PER_SAMPLE];
     int32_t  sum_x = 0;
     int32_t  sum_y = 0;
+    int32_t  sum_z = 0;
     int32_t  min_x = 32767;
     int32_t  max_x = -32768;
     int32_t  axis_x;
@@ -182,6 +193,7 @@ static bool calibrate(void)
         cal_x[count]   = (int16_t)axis_x;
         sum_x         += axis_x;
         sum_y         += (int32_t)get_axis(&buf[2]);
+        sum_z         += (int32_t)get_axis(&buf[4]);
         min_x          = (axis_x < min_x) ? axis_x : min_x;
         max_x          = (axis_x > max_x) ? axis_x : max_x;
     }
@@ -212,6 +224,7 @@ static bool calibrate(void)
         {
             offset_x = (int16_t)mean_x;
             offset_y = (int16_t)(sum_y / (int32_t)S4_CAL_SAMPLES);
+            rest_z_mg = to_milli_g(sum_z / (int32_t)S4_CAL_SAMPLES);
             b_ok     = true;
         }
     }
@@ -364,7 +377,7 @@ static void step_hump_machine(int32_t travelled_mm)
         break;
 
         default:
-            /* COLLISION and TILT_FAULT latch until a reset request; the
+            /* LIFTED and TILT_FAULT latch until a reset request; the
                other states are handled by the caller. */
         break;
     }
@@ -386,7 +399,10 @@ static void apply_reset_request(void)
         tilt_debounce   = 0u;
         last_distance_mm = s2_get_distance_mm();
 
-        if ((S4_COLLISION == state) || (S4_TILT_FAULT == state))
+        b_lift_primed   = false;
+        lift_run        = 0u;
+
+        if ((S4_LIFTED == state) || (S4_TILT_FAULT == state))
         {
             state = S4_IDLE;
         }
@@ -466,13 +482,17 @@ static uint16_t side_height_for(int32_t roll_abs_deg)
 /* Report the current side ramp on the console (and car18/log). */
 static void report_side(const char *p_when)
 {
-    side_height_mm = side_height_for(side_peak_deg);
-    side_sign      = (int8_t)side_dir;
+    uint16_t height_mm = side_height_for(side_peak_deg);
+
+    side_word = (uint16_t)(((height_mm > S4_SIDE_MM_MAX)
+                            ? S4_SIDE_MM_MAX : height_mm)
+                           | ((side_dir > 0) ? S4_SIDE_UP_POS
+                              : ((side_dir < 0) ? S4_SIDE_UP_NEG : 0u)));
 
     APP_LOG((UB*)"[S4] side ramp %s: %s side up, peak roll %d deg -> "
                  "%d mm\n", p_when,
             (side_dir > 0) ? "roll+" : "roll-", (INT)side_peak_deg,
-            (INT)side_height_mm);
+            (INT)height_mm);
 }
 
 /*
@@ -569,102 +589,74 @@ static void step_side_ramp(void)
 }
 
 /*
- * Impact test on every sample of a batch.  One sample over the threshold
- * is NOT an impact: motor and gearbox vibration, or a corrupted I2C read
- * while the motors draw current, produces single-sample spikes.  A real
- * collision decelerates the car for several milliseconds, so it takes
- * S4_IMPACT_SAMPLES consecutive samples over the threshold.
+ * Lift check on every sample of a batch.  Z is smoothed first (motor
+ * vibration and the odd bad I2C read are single-sample spikes), then a
+ * lift is the smoothed Z more than S4_LIFT_MG from its resting value for
+ * S4_LIFT_SAMPLES in a row.  Either direction: the car is accelerated up
+ * when picked up and down when the hand stops it.
  */
-static bool detect_impact(const uint8_t *p_buf, uint8_t count)
+static bool detect_lift(const uint8_t *p_buf, uint8_t count)
 {
-    const int32_t limit_sq = S4_IMPACT_MILLI_G * S4_IMPACT_MILLI_G;
-    int32_t ax_mg;
-    int32_t ay_mg;
-    int32_t mag_sq;
+    int32_t az_mg;
+    int32_t off_mg;
     uint8_t idx;
-    bool    b_impact = false;
+    bool    b_lift = false;
 
     for (idx = 0u; idx < count; idx++)
     {
-        ax_mg = to_milli_g((int32_t)get_axis(&p_buf[idx * 6u])
-                           - (int32_t)offset_x);
-        ay_mg = to_milli_g((int32_t)get_axis(&p_buf[(idx * 6u) + 2u])
-                           - (int32_t)offset_y);
+        az_mg = to_milli_g((int32_t)get_axis(&p_buf[(idx * 6u) + 4u]));
 
-        /* FORE-AFT jolt only, squared.  Hard line-following swerves
-           (wheels 58/2 -> 9/51) threw the car SIDEWAYS at 2.2 g and
-           latched a false COLLISION; a real hit is along the car. */
-        mag_sq = (1 == S4_IMU_SWAP_XY) ? (ay_mg * ay_mg) : (ax_mg * ax_mg);
-
-        if (mag_sq > limit_sq)
+        if (!b_lift_primed)
         {
-            if (0u == impact_run)
-            {
-                impact_peak_x = ax_mg;
-                impact_peak_y = ay_mg;
-            }
-            else if (mag_sq > ((impact_peak_x * impact_peak_x)
-                               + (impact_peak_y * impact_peak_y)))
-            {
-                impact_peak_x = ax_mg;
-                impact_peak_y = ay_mg;
-            }
-            else
-            {
-                /* Weaker than the peak so far. */
-            }
+            lift_z_mg     = az_mg;        /* start from where it is */
+            b_lift_primed = true;
+        }
+        lift_z_mg += (az_mg - lift_z_mg) / S4_LIFT_FILTER_DIV;
 
-            if (impact_run < 0xFFu)
-            {
-                impact_run = (uint8_t)(impact_run + 1u);
-            }
-            if (impact_run >= S4_IMPACT_SAMPLES)
-            {
-                b_impact = true;
-            }
+        off_mg = lift_z_mg - rest_z_mg;
+        off_mg = (off_mg < 0) ? -off_mg : off_mg;
+        lift_peak_mg = (off_mg > lift_peak_mg) ? off_mg : lift_peak_mg;
+
+        if (off_mg > S4_LIFT_MG)
+        {
+            lift_run = (lift_run < 0xFFFFu) ? (uint16_t)(lift_run + 1u)
+                                            : lift_run;
+            b_lift   = b_lift || (lift_run >= S4_LIFT_SAMPLES);
         }
         else
         {
-            impact_run = 0u;
+            lift_run = 0u;
         }
     }
 
-    return (b_impact);
+    return (b_lift);
 }
 
 /*
- * Process one drained batch while active: impact check on every sample,
+ * Process one drained batch while active: lift check on every sample,
  * then the tilt-fault and hump logic on the (already updated) tilt.
  */
 static void process_batch(const uint8_t *p_buf, uint8_t count)
 {
     int32_t distance_now;
-    bool    b_driving;
-
-    /* The motion gate separates an impact from the car being picked up
-       or knocked at rest (assumption A8): only while driving. */
-    b_driving = (M_LINE_PID == s2_get_state()) || (M_MOVE == s2_get_state());
-
-    if (!b_driving)
-    {
-        impact_run = 0u;
-    }
 
     if (!b_calibrated)
     {
-        /* Uncalibrated: tilt and jolts cannot be trusted, and IMU_FAULT
+        /* Uncalibrated: no resting Z and no offsets, and IMU_FAULT
            (DEGRADE) is already set.  Never E-STOP on this data. */
-        impact_run    = 0u;
+        lift_run      = 0u;
         tilt_debounce = 0u;
     }
-    else if (b_driving && detect_impact(p_buf, count))
+    else if (detect_lift(p_buf, count))
     {
-        fault_set(FAULT_COLLISION);
-        state      = S4_COLLISION;
-        impact_run = 0u;
-        APP_LOG((UB*)"[S4] COLLISION: x %d mg  y %d mg (%d samples)\n",
-                  (INT)impact_peak_x, (INT)impact_peak_y,
-                  (INT)S4_IMPACT_SAMPLES);
+        /* Whenever the run is active, not only while the wheels turn:
+           a car lifted during an obstacle scan would otherwise drive off
+           in the air when the scan ends. */
+        fault_set(FAULT_LIFTED);
+        state    = S4_LIFTED;
+        lift_run = 0u;
+        APP_LOG((UB*)"[S4] LIFTED: Z %d mg, rest %d mg -> motors stopped\n",
+                  (INT)lift_z_mg, (INT)rest_z_mg);
     }
     else if ((tilt_deg > S4_TILT_FAULT_DEG) || (tilt_deg < -S4_TILT_FAULT_DEG)
              || (roll_deg > S4_TILT_FAULT_DEG)
@@ -773,7 +765,6 @@ EXPORT void imu_task(INT stacd, void *p_exinf)
         (void)app_wait_period();
 
         apply_reset_request();
-        s4_lift_step(b_active, PERIOD_IMU_MS);
 
         count = read_fifo(buf, S4_FIFO_MAX_READ);
 
@@ -798,13 +789,31 @@ EXPORT void imu_task(INT stacd, void *p_exinf)
                 state = S4_LEVEL_RUN;
             }
 
+            if (b_active && !b_was_active)
+            {
+                lift_peak_mg  = 0;              /* new run */
+                b_lift_primed = false;
+                lift_run      = 0u;
+            }
+            else if (!b_active && b_was_active && b_calibrated)
+            {
+                APP_LOG((UB*)"[S4] lift check: peak %d mg this run "
+                             "(stops above %d)\n", (INT)lift_peak_mg,
+                        (INT)S4_LIFT_MG);
+            }
+            else
+            {
+                /* No change. */
+            }
+            b_was_active = b_active;
+
             if (!b_active)
             {
-                state = ((S4_COLLISION == state) || (S4_TILT_FAULT == state))
+                state = ((S4_LIFTED == state) || (S4_TILT_FAULT == state))
                       ? state : S4_IDLE;
                 last_distance_mm = s2_get_distance_mm();
             }
-            else if ((count > 0) && (S4_COLLISION != state)
+            else if ((count > 0) && (S4_LIFTED != state)
                      && (S4_TILT_FAULT != state))
             {
                 process_batch(buf, (uint8_t)count);
@@ -824,7 +833,7 @@ EXPORT uint8_t s4_get_hump_packed(void)
 
 EXPORT uint16_t s4_get_side_height_mm(void)
 {
-    return (side_height_mm);
+    return ((uint16_t)(side_word & S4_SIDE_MM_MASK));
 }
 
 EXPORT uint16_t s4_get_side_live_mm(void)
@@ -838,7 +847,23 @@ EXPORT uint16_t s4_get_side_live_mm(void)
 
 EXPORT int8_t s4_get_side_sign(void)
 {
-    return (side_sign);
+    uint16_t word = side_word;                  /* one load */
+    int8_t   sign = 0;
+
+    if (0u != (word & S4_SIDE_UP_POS))
+    {
+        sign = 1;
+    }
+    else if (0u != (word & S4_SIDE_UP_NEG))
+    {
+        sign = -1;
+    }
+    else
+    {
+        /* No side ramp yet. */
+    }
+
+    return (sign);
 }
 
 EXPORT int8_t s4_get_roll_deg(void)

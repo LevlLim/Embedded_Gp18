@@ -1,16 +1,20 @@
 /*
  * subsystem4.h
  *
- * Subsystem 4 -- IMU calibration, terrain and collision.
+ * Subsystem 4 -- IMU calibration, terrain and lift stop.
  * Buddy 4 (Jian Yan), 2500853.
  *
  * Implements Statechart 4 of Design Review V2 section 6.4.
  *
  * A hump is a SEQUENCE, not a reading: the height is only valid if
- * nose-up, crest, nose-down and level occur in that order.  The same
- * vertical spike means terrain on a climb and a collision on flat ground,
- * so the meaning depends on the current state -- which is exactly why a
- * statechart rather than a set of if-statements.
+ * nose-up, crest, nose-down and level occur in that order -- which is
+ * exactly why a statechart rather than a set of if-statements.
+ *
+ * LIFT STOP (replaces collision detection, which is removed): picking the
+ * car up while it runs E-STOPs the motors (FAULT_LIFTED).  Deliberately
+ * simple: the vertical (Z) acceleration, smoothed, leaving its resting
+ * value by more than S4_LIFT_MG for S4_LIFT_MS.  No lift / overturn
+ * classification; a lean past S4_TILT_FAULT_DEG still raises TILT.
  *
  * HEIGHT METHOD: h += sin(tilt) x wheel_distance, accumulated over the
  * distance the wheels actually travelled.  Double-integrating acceleration
@@ -50,16 +54,23 @@
 #define S4_CTRL5_FIFO_EN        (0x40u)
 #define S4_FIFO_CTRL_STREAM     (0x80u)
 
-/* +/-8 g, NOT +/-2 g: at +/-2 g the axis saturates at 1999 mg, so the
-   2000 mg impact threshold below could never be crossed (collision
-   detection was unreachable). */
+/* +/-8 g full scale (kept from the removed collision check; the lift
+   check only needs a few hundred mg either way). */
 #define S4_FULL_SCALE_MG        (8000)
 #define S4_FIFO_MAX_READ        (8u)     /* samples per cycle (4 expected)*/
 
 /* Thresholds.  ALL PROVISIONAL -- assumptions A7 and A8 are open and
    these must be set from logged data, not guessed at. */
-#define S4_IMPACT_MILLI_G       (2000)  /* 2 g fore-aft jolt, A8         */
-#define S4_IMPACT_SAMPLES       (3u)    /* in a row: 7.5 ms at 400 Hz    */
+
+/* LIFT STOP.  Z = up/down.  Each 400 Hz sample moves the smoothed Z
+   1/S4_LIFT_FILTER_DIV of the way (8: ~20 ms), so motor vibration and
+   single bad reads do not count; a lift is the smoothed Z more than
+   S4_LIFT_MG from its value at calibration for S4_LIFT_MS in a row.  A
+   ramp only changes Z by 1 - cos(angle): ~60 mg at 20 degrees.  Set from
+   the "[S4] lift check: peak N mg" line printed after each run. */
+#define S4_LIFT_MG              (300)   /* off the rest value, mg        */
+#define S4_LIFT_MS              (40u)   /* that long in a row            */
+#define S4_LIFT_FILTER_DIV      (8)
 #define S4_TILT_FAULT_DEG       (30)    /* sustained lean = tipped over  */
 #define S4_TILT_FILTER_DIV      (4)     /* ~40 ms smoothing of the angles */
 
@@ -86,11 +97,6 @@
    between the tyre centres -- measure it with a ruler (not
    S2_TRACK_WIDTH_MM, which is tuned for turning).  PROVISIONAL. */
 #define S4_WHEEL_SPACING_MM     (130)
-#define S4_LIFT_DOWN_DEG        (-180)     /* sensor just above the track   */
-#define S4_LIFT_UP_DEG          (0)    /* clear of the ramp             */
-#define S4_LIFT_START_DEG       (8)     /* lift at this pitch or roll    */
-#define S4_LIFT_LEVEL_DEG       (2)     /* lower once both are under ... */
-#define S4_LIFT_LOWER_MS        (500u)  /* ... for this long             */
 #define S4_SIDE_START_DEG       (5)
 #define S4_SIDE_LEVEL_DEG       (2)
 #define S4_SIDE_DEBOUNCE        (8u)    /* readings in a row (80 ms)     */
@@ -110,7 +116,7 @@ typedef enum
     S4_HUMP_CREST   = 4,
     S4_HUMP_FALLING = 5,
     S4_HUMP_DONE    = 6,
-    S4_COLLISION    = 7,
+    S4_LIFTED       = 7,    /* was COLLISION */
     S4_TILT_FAULT   = 8,
     S4_IMU_FAULT    = 9
 } s4_state_t;
@@ -147,7 +153,7 @@ bool s4_run_data_invalid(void);
    nothing. */
 void s4_set_active(bool b_on);
 
-/* Ask for the run data to be cleared and any latched COLLISION/TILT state
+/* Ask for the run data to be cleared and any latched LIFTED/TILT state
    released.  Called by the Controller on RESET or a new run.  The IMU
    task applies it at the start of its next cycle, so its private state
    is only ever written by the IMU task itself (rule R1). */
@@ -159,11 +165,6 @@ int8_t  s4_pitch_deg(int32_t ax_mg, int32_t az_mg);
 
 /* The task body.  Private to subsystem 4. */
 void imu_task(INT stacd, void *p_exinf);
-
-/* Barcode sensor lift (barcode_lift.c). */
-void s4_lift_init(void);
-void s4_lift_step(bool b_running, uint32_t period_ms);
-bool s4_barcode_lifted(void);       /* true: ignore the barcode IR */
 
 #endif /* SUBSYSTEM4_H */
 

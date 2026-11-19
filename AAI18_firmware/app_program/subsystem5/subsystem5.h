@@ -71,7 +71,8 @@ typedef enum
     OB_COARSE_SCAN = 1,     /* sweeping the forward arc while driving  */
     OB_WAIT_STOP   = 2,     /* reported, waiting for the Controller    */
     OB_FINE_SCAN   = 3,     /* car stopped: stepped scan, wide arc     */
-    OB_HOLD        = 4      /* profile sent: servo forward, D_stop     */
+    OB_HOLD        = 4,     /* profile sent: servo forward, D_stop     */
+    OB_SIDE        = 5      /* bypass: servo to the side, measuring    */
 } s5_obstacle_phase_t;
 
 /* Controller -> Obstacle Scan requests (one byte, single writer). */
@@ -79,7 +80,11 @@ typedef enum
 {
     S5_REQ_NONE   = 0,
     S5_REQ_SCAN   = 1,      /* the car is stopped: profile now         */
-    S5_REQ_RESUME = 2       /* back to coarse scanning                 */
+    S5_REQ_RESUME = 2,      /* back to coarse scanning                 */
+    S5_REQ_SIDE_L = 3,      /* bypass: look left (obstacle on the left) */
+    S5_REQ_SIDE_R = 4,      /* bypass: look right                       */
+    S5_REQ_AHEAD  = 5,      /* bypass: look ahead again (D_stop guard)  */
+    S5_REQ_MEASURE = 6      /* bypass: straight ahead, report readings  */
 } s5_request_t;
 
 /* ---------------------------------------------------------------------
@@ -111,6 +116,10 @@ typedef enum
 #define S5_STEP_DEG             (5)
 #define S5_SERVO_LIMIT_DEG      (S5_SCAN_ARC_DEG)   /* hard clamp        */
 #define S5_FINE_ARC_DEG         (S5_SCAN_ARC_DEG)   /* car stopped       */
+/* 0 = servo straight ahead while driving (obstacles are on the track);
+   it only sweeps after stopping for one.  1 = sweep +-S5_COARSE_ARC_DEG
+   while driving too. */
+#define S5_DRIVE_SWEEP          (0)
 #define S5_COARSE_ARC_DEG       (((S5_SCAN_ARC_DEG / 2) / S5_STEP_DEG) \
                                  * S5_STEP_DEG)     /* while driving     */
 #define S5_FINE_STEPS           ((uint32_t)(((2 * S5_FINE_ARC_DEG)     \
@@ -125,7 +134,7 @@ MSG_STATIC_ASSERT((S5_SCAN_ARC_DEG >= 10) && (S5_SCAN_ARC_DEG <= 60),
    treated as no reading (the sensor's own blind zone). */
 #define S5_CONFIRM_PINGS        (2u)
 #define S5_START_GRACE_MS       (800u)  /* ignore the START-pressing hand */
-#define S5_MIN_VALID_CM         (10u)    /* 3 cm ghost echoes stopped the car */
+#define S5_MIN_VALID_CM         (5u)    /* 3 cm ghost echoes stopped the car */
 #define S5_DSTOP_ARC_DEG        (15)    /* D_stop only counts ahead      */
 #define S5_OBJECT_DEPTH_TOL_CM  (10u)   /* same object if within this    */
 #define S5_CLEAR_RANGE_CM       (50u)   /* free if nothing nearer        */
@@ -138,6 +147,84 @@ MSG_STATIC_ASSERT((S5_SCAN_ARC_DEG >= 10) && (S5_SCAN_ARC_DEG <= 60),
    At a junction the sensors reach the cross line first; the car drives
    on this far so it turns about the junction itself.  PROVISIONAL. */
 #define S5_SENSOR_TO_AXLE_MM    (60u)
+/* Leg 3 drives distance + width + this + margin past the obstacle.  Was
+   the whole car length (20): test 8 drove 63 cm and left the mat. */
+/* Bypass side when both sides are equally open:
+   0 = the side the obstacle sticks out less on, 1 = LEFT, 2 = RIGHT. */
+#ifndef S5_TIE_SIDE
+#define S5_TIE_SIDE             (0)
+#endif
+/* Rejoining the line after a bypass (leg 5): a black stripe counts as
+   the track line only if it is S5_LINE_MIN_MM..S5_LINE_MAX_MM wide and
+   followed by S5_LINE_WHITE_MM of white.  Barcode bars (run along the
+   car's path here) are rejected: test 9 realigned on a barcode sheet. */
+#ifndef S5_LINE_MIN_MM
+#define S5_LINE_MIN_MM          (8)
+#endif
+#ifndef S5_LINE_MAX_MM
+#define S5_LINE_MAX_MM          (45)
+#endif
+/* Crossing at 45 degrees the stripe reads much wider: the tape itself
+   (18 / sin 45 = 25 mm) PLUS the gap between the two line sensors, which
+   cross it one after the other (~24 mm).  45 rejected the real line and
+   the car drove past it (bench 17 Nov). */
+#ifndef S5_LINE_MAX_45_MM
+#define S5_LINE_MAX_45_MM       (80)
+#endif
+#ifndef S5_LINE_WHITE_MM
+#define S5_LINE_WHITE_MM        (25)
+#endif
+/* Bypass turns: 45 = diagonal out and back (default), 90 = square. */
+#ifndef S5_BYPASS_TURN_DEG
+#define S5_BYPASS_TURN_DEG      (45u)
+#endif
+/* How far anything sticks out beyond S5_ROBOT_WIDTH_CM on each side
+   (the barcode sensor is on the LEFT).  Added to the sideways leg when
+   the obstacle passes on that side. */
+#ifndef S5_LEFT_OVERHANG_CM
+#define S5_LEFT_OVERHANG_CM     (4)
+#endif
+#ifndef S5_RIGHT_OVERHANG_CM
+#define S5_RIGHT_OVERHANG_CM    (0)
+#endif
+/* MEASURING THE OBSTACLE while passing it (leg 3): the servo turns to
+   its limit towards the obstacle and the car notes how far it drives
+   while the sensor sees it (= the obstacle's length).  Once the sensor
+   loses it, leg 3 ends early: the far end is (reading x cos 30) ahead of
+   the sensor, plus sensor-to-axle, plus S5_PASS_EXTRA_CM + margin.
+   A reading this close or closer counts as the obstacle. */
+/* Ultrasonic beam spread: the scan sees each edge of an obstacle this far
+   outside where it really is, so the width reads 2x this too wide (and
+   the bypass swings out too far).  Set it from a real obstacle: (printed
+   width - real width) / 2.  0 = no correction. */
+#ifndef S5_BEAM_SPREAD_CM
+#define S5_BEAM_SPREAD_CM       (0)
+#endif
+
+#ifndef S5_BEAM_HALF_DEG
+#define S5_BEAM_HALF_DEG        (10)
+#endif
+/* PATH CHECK, mid-bypass: after turning back towards the line (leg 4)
+   the sensor looks along the way to the line.  Anything closer than that
+   way is the obstacle not yet passed: turn parallel again, drive
+   S5_PATH_STEP_CM further, turn back and look again (up to
+   S5_PATH_TRIES times). */
+#ifndef S5_PATH_STEP_CM
+#define S5_PATH_STEP_CM         (10u)
+#endif
+#ifndef S5_PATH_TRIES
+#define S5_PATH_TRIES           (6u)
+#endif
+#ifndef S5_SIDE_NEAR_CM
+#define S5_SIDE_NEAR_CM         (60u)
+#endif
+#ifndef S5_US_TO_AXLE_CM                /* ultrasonic ahead of the axle  */
+#define S5_US_TO_AXLE_CM        (10u)
+#endif
+#define S5_SIDE_LOST_PINGS      (3u)    /* far this many pings in a row  */
+#ifndef S5_PASS_EXTRA_CM
+#define S5_PASS_EXTRA_CM        (8u)
+#endif
 #define S5_CLEARANCE_MARGIN_CM  (5u)
 #define S5_SEARCH_TIMEOUT_MS    (5000u) /* FR8: reacquire within 5 s     */
 #define S5_REVERSE_MM           (100u)
@@ -150,7 +237,7 @@ void s5_post_event(uint32_t event_bits);
    ignored while driving.  For checking turn angles (S2_TRACK_WIDTH_MM)
    and distances (S2_WHEEL_DIAM_MM) without driving the course. */
 #define S5_MANUAL_TURN_DEG      (90u)
-#define S5_MANUAL_FWD_MM        (500u)
+#define S5_MANUAL_FWD_MM        (700u)
 #define S5_MANUAL_BACK_MM       (200u)
 void s5_manual_move(msg_cmd_type_t type, uint32_t arg);
 
@@ -182,14 +269,26 @@ bool s5_is_initialised(void);
    One byte, written only by Obstacle Scan. */
 uint8_t s5_get_obstacle_distance_cm(void);
 
-/* Where the scan servo points now, degrees from straight ahead (+ right,
-   trim excluded).  For the debug line. */
-int32_t s5_get_servo_angle(void);
+/* Bypass side look: the latest reading (cm, 0 = nothing / invalid) and
+   a count that goes up by one per ping, so a new reading can be told
+   from an old one. */
+uint8_t s5_get_side_cm(uint32_t *p_count);
+
+/* True if the last profile's obstacle reached an end of the scan arc: its
+   real edge was not seen, so its width is a lower bound only. */
+bool s5_last_scan_clipped(void);
+/* The last profile's obstacle edges, cm from the car's centre line
+   (left negative), each pushed out by one scan step for safety. */
+void s5_get_edges_cm(int32_t *p_left_cm, int32_t *p_right_cm);
 
 /* Testing without a printed barcode: store a junction command
    (msg_barcode_cmd_t) exactly as if a barcode had been read.  From the
    MQTT text commands jleft / jright / jstraight / juturn. */
 void s5_inject_turn(uint8_t cmd);
+
+/* Where the scan servo points now, degrees from straight ahead (+ right,
+   trim excluded).  For the debug line. */
+int32_t s5_get_servo_angle(void);
 
 /* Controller -> Obstacle Scan. */
 void s5_obstacle_request(s5_request_t req);

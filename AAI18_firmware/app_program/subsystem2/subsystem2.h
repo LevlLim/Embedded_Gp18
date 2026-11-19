@@ -83,7 +83,7 @@ typedef enum
 
 /* Spin turns (line search, barcode, bypass) run at no more than this, so
    the car can stop on the line instead of sweeping past it. */
-#define S2_TURN_DUTY_PCT        (34u)   /* 25 could not pivot the car    */
+#define S2_TURN_DUTY_PCT        (26u)   /* 25 could not pivot the car    */
 
 /* Measured moves keep both wheels in step (drive_balanced() in
    task_motion.c): duty is moved from the wheel that is ahead (per mille of
@@ -91,13 +91,17 @@ typedef enum
    half the move duty. */
 #define S2_MOVE_BALANCE_DIV     (8)     /* P: 8 per mille -> 1 % duty    */
 #define S2_MOVE_BALANCE_I_DIV   (160)    /* I: sum / 80 -> % duty         */
-#define S2_MIN_RUN_DUTY_PCT     (34u)   /* below this a wheel stalls     */
+#define S2_MIN_RUN_DUTY_PCT     (28u)   /* below this a wheel stalls     */
+#define S2_BC_STEER_DIV         (4)   
 #define S2_INNER_REVERSE_MAX_PCT (0)
 
+#define S2_CLIMB_ROLL_DEG       (-5)    /* boost once roll is below this */
+#define S2_CLIMB_OFF_DEG        (-2)    /* ...until it is back above this */
+#define S2_CLIMB_BOOST_PCT      (25u)   /* added to the cruise duty       */
 /* Stall detection: drive commanded above this duty with no encoder edge
    for this long means the wheel is not turning. */
 #define S2_STALL_DUTY_PCT       (25u)
-#define S2_STALL_TIMEOUT_MS     (300u)
+#define S2_STALL_TIMEOUT_MS     (600u)
 
 /* Encoder health: over this window, one wheel producing at least
    S2_ENC_FAULT_EDGES edges while the other produces none is a fault. */

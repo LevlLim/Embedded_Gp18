@@ -20,7 +20,7 @@
  *     performs a read-modify-write on the whole word.  The Cortex-M0+ has
  *     no atomic bit-set instruction, so a read-modify-write from two
  *     sources silently loses one of them -- this is risk R4, and it would
- *     mean a real collision is never reported.
+ *     mean a real E-STOP is never reported.
  *
  *  2. Only the Vehicle Controller clears, through fault_clear(), on RESET.
  *     WIFI_LOSS is the single exception: it is self-healing and is in
@@ -46,7 +46,8 @@
  * Bit assignments.  Design Review V2 table 7.3.
  * Severity column:  E = E-STOP, D = DEGRADE, R = REPORT-ONLY
  * --------------------------------------------------------------------- */
-#define FAULT_COLLISION         (0x0001u)  /* bit 0  E  IMU / Terrain     */
+#define FAULT_LIFTED            (0x0001u)  /* bit 0  E  IMU / Terrain     */
+                                           /* (was COLLISION, removed)  */
 #define FAULT_TILT              (0x0002u)  /* bit 1  E  IMU / Terrain     */
 #define FAULT_OBSTACLE_STOP     (0x0004u)  /* bit 2  E  Obstacle Scan     */
 #define FAULT_REMOTE_STOP       (0x0008u)  /* bit 3  E  Telemetry / VC    */
@@ -60,7 +61,7 @@
 /*
  * Masks.  Motion Control waits on FAULT_MASK_ESTOP and nothing else.
  */
-#define FAULT_MASK_ESTOP        (FAULT_COLLISION      \
+#define FAULT_MASK_ESTOP        (FAULT_LIFTED         \
                                | FAULT_TILT           \
                                | FAULT_OBSTACLE_STOP  \
                                | FAULT_REMOTE_STOP    \

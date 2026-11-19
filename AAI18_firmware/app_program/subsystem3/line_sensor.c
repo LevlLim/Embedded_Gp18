@@ -33,6 +33,13 @@
 #define LS_TICK_MS          (5u)        /* line_task period               */
 #define LS_OUTWARD_TICKS    (S3_OUTWARD_MS / LS_TICK_MS)
 #define LS_WHITE_LOST_TICKS (S3_WHITE_LOST_MS / LS_TICK_MS)
+/* After a sensor leaves the line, keep turning that way and fade out
+   over S3_HOLD_MS, instead of snapping straight (forward-jerk-forward).
+   0 = off (the old behaviour). */
+#ifndef S3_HOLD_MS
+#define S3_HOLD_MS          (200)
+#endif
+#define LS_HOLD_TICKS       (S3_HOLD_MS / LS_TICK_MS)
 #ifndef S3_CURVE_STEP                   /* older subsystem3.h */
 #define S3_CURVE_STEP       (8)
 #define S3_CURVE_MAX        (32)
@@ -79,6 +86,7 @@ static uint16_t dark_ticks[2]  = { 0u, 0u };   /* current dark spell    */
 static int8_t   lost_dir       = 0;            /* -1 / +1 while lost    */
 static int8_t   last_side      = 0;            /* -1 L / +1 R last seen */
 static int32_t  curve_boost    = 0;            /* extra steer in a curve */
+static int32_t  touch_mag      = 0;            /* last one-sensor steer  */
 static uint16_t white_ticks    = 0u;           /* both white, in a row  */
 static int8_t   prev_error     = 0;            /* last published error  */
 static int8_t   both_error     = 0;            /* held while both black */
@@ -189,10 +197,28 @@ static void note_touch(int8_t side, uint8_t idx)
 static int32_t touch_steer(uint8_t idx, uint16_t value)
 {
     int32_t magnitude = clamp_error(strength(idx, value) + curve_boost);
+    int32_t from      = (int32_t)LS_OUTWARD_TICKS / 2;
+    int32_t dark      = (int32_t)dark_ticks[idx];
 
-    if (dark_ticks[idx] >= LS_OUTWARD_TICKS)
+    /* Ramp up to full lock between half and all of S3_OUTWARD_MS, rather
+       than jumping to it (a jump is a jerk). */
+    if ((from > 0) && (dark >= (int32_t)LS_OUTWARD_TICKS))
     {
         magnitude = MSG_LIM_LINE_ERROR;
+    }
+    else if ((from > 0) && (dark > from))
+    {
+        magnitude = magnitude
+                  + (((MSG_LIM_LINE_ERROR - magnitude) * (dark - from))
+                     / from);
+    }
+    else if ((0 == from) && (dark >= (int32_t)LS_OUTWARD_TICKS))
+    {
+        magnitude = MSG_LIM_LINE_ERROR;
+    }
+    else
+    {
+        /* Below the ramp. */
     }
 
     return (magnitude);
@@ -250,6 +276,93 @@ static void watch_junction(void)
 }
 
 /*
+ * Both black: a junction OR a sharp corner (both sensors cross the bend's
+ * outer edge together).  Keep steering the way the car already was:
+ * straight at a junction met square on, still turning in a corner.
+ * (Was: 0, which drove the car straight off the mat at the first 90
+ * degree corner.)
+ */
+static int32_t both_black_error(void)
+{
+    lost_dir = 0;
+    if (0u == both_ticks)
+    {
+        /* First both-black sample: decide once, hold it.  In a corner one
+           sensor had been on the bend for a while; at a crossing met at
+           an angle one sensor touched the crossing line only moments
+           before the other (bench: an X crossing taken at full lock drove
+           the car off the mat). */
+        both_error = ((dark_ticks[0] >= LS_CORNER_TICKS)
+                      || (dark_ticks[1] >= LS_CORNER_TICKS))
+                   ? prev_error : 0;
+
+        /* A STRAIGHT barcode is waiting: this is a junction, not a
+           corner, whatever the car was doing (bench: finishing the loop
+           late, still turning, it took the junction as a corner and went
+           round again). */
+        if (b_force_straight || (1 == S3_JUNCTION_STRAIGHT))
+        {
+            both_error       = 0;
+            b_force_straight = false;
+        }
+    }
+
+    return ((int32_t)both_error);
+}
+
+/*
+ * Both white: the line is between the sensors OR has slipped out past the
+ * one that saw it last -- these sensors switch, so the two look the same.
+ * Steering gently TOWARD the last sensor settles it either way: a line in
+ * the middle drifts across to the OTHER sensor, a line outside comes back
+ * under the SAME one.  Just after a touch the turn fades out over
+ * S3_HOLD_MS instead of snapping straight.  A long dark spell first means
+ * a sharp curve took it out: turn fully.  Too long all white: lost.
+ */
+static int32_t both_white_error(bool *pb_any_line)
+{
+    int32_t error = 0;
+    int32_t seek;
+    int32_t held = 0;
+
+    if (0 != lost_dir)
+    {
+        /* Still lost: nothing has seen the line yet. */
+    }
+    else if (dark_ticks[0] >= LS_OUTWARD_TICKS)
+    {
+        lost_dir = -1;
+    }
+    else if (dark_ticks[1] >= LS_OUTWARD_TICKS)
+    {
+        lost_dir = 1;
+    }
+    else if ((0 != last_side) && (white_ticks >= LS_WHITE_LOST_TICKS))
+    {
+        lost_dir = last_side;
+    }
+    else
+    {
+        seek = clamp_error(S3_SEEK_ERROR + curve_boost);
+        if ((int32_t)white_ticks < (int32_t)LS_HOLD_TICKS)
+        {
+            held = (touch_mag * ((int32_t)LS_HOLD_TICKS
+                                 - (int32_t)white_ticks))
+                 / (int32_t)LS_HOLD_TICKS;
+        }
+        error = (int32_t)last_side * ((held > seek) ? held : seek);
+    }
+
+    if (0 != lost_dir)
+    {
+        error        = (int32_t)lost_dir * MSG_LIM_LINE_ERROR;
+        *pb_any_line = false;
+    }
+
+    return (error);
+}
+
+/*
  * Steering error.  Negative = the line is to the car's LEFT (steer left),
  * positive = to its right.  *pb_any_line is false only while LOST.
  */
@@ -275,34 +388,7 @@ static int8_t compute_error(uint16_t left_value, uint16_t right_value,
 
     if (b_dark[0] && b_dark[1])
     {
-        /* Both black: a junction OR a sharp corner (both sensors cross
-           the bend's outer edge together).  Keep steering the way the
-           car already was: straight at a junction met square on, still
-           turning in a corner.  (Was: 0, which drove the car straight
-           off the mat at the first 90 degree corner.) */
-        lost_dir = 0;
-        if (0u == both_ticks)
-        {
-            /* First both-black sample: decide once, hold it.  In a
-               corner one sensor had been on the bend for a while; at a
-               crossing met at an angle one sensor touched the crossing
-               line only moments before the other (bench: an X crossing
-               taken at full lock drove the car off the mat). */
-            both_error = ((dark_ticks[0] >= LS_CORNER_TICKS)
-                          || (dark_ticks[1] >= LS_CORNER_TICKS))
-                       ? prev_error : 0;
-
-            /* A STRAIGHT barcode is waiting: this is a junction, not a
-               corner, whatever the car was doing (bench: finishing the
-               loop late, still turning, it took the junction as a corner
-               and went round again). */
-            if (b_force_straight || (1 == S3_JUNCTION_STRAIGHT))
-            {
-                both_error       = 0;
-                b_force_straight = false;
-            }
-        }
-        error = (int32_t)both_error;
+        error = both_black_error();
     }
     else if (b_dark[0])
     {
@@ -310,6 +396,7 @@ static int8_t compute_error(uint16_t left_value, uint16_t right_value,
         lost_dir  = 0;
         last_side = -1;
         error     = -touch_steer(0u, left_value);
+        touch_mag = -error;
     }
     else if (b_dark[1])
     {
@@ -317,43 +404,11 @@ static int8_t compute_error(uint16_t left_value, uint16_t right_value,
         lost_dir  = 0;
         last_side = 1;
         error     = touch_steer(1u, right_value);
+        touch_mag = error;
     }
     else
     {
-        /* Both white: the line is between the sensors OR has slipped out
-           past the one that saw it last -- these sensors switch, so the
-           two look the same.  Steering gently TOWARD the last sensor
-           settles it either way: a line in the middle drifts across to
-           the OTHER sensor, a line outside comes back under the SAME
-           one.  A long dark spell first means a sharp curve took it
-           out: turn fully.  Too long all white: lost. */
-        if (0 != lost_dir)
-        {
-            /* Still lost: nothing has seen the line yet. */
-        }
-        else if (dark_ticks[0] >= LS_OUTWARD_TICKS)
-        {
-            lost_dir = -1;
-        }
-        else if (dark_ticks[1] >= LS_OUTWARD_TICKS)
-        {
-            lost_dir = 1;
-        }
-        else if ((0 != last_side) && (white_ticks >= LS_WHITE_LOST_TICKS))
-        {
-            lost_dir = last_side;
-        }
-        else
-        {
-            error = (int32_t)last_side
-                  * clamp_error(S3_SEEK_ERROR + curve_boost);
-        }
-
-        if (0 != lost_dir)
-        {
-            error        = (int32_t)lost_dir * MSG_LIM_LINE_ERROR;
-            *pb_any_line = false;
-        }
+        error = both_white_error(pb_any_line);
     }
 
     prev_error = (int8_t)error;
@@ -693,6 +748,7 @@ EXPORT void line_task(INT stacd, void *p_exinf)
                 lost_dir         = 0;
                 last_side        = 0;
                 curve_boost      = 0;
+                touch_mag        = 0;
                 prev_error       = 0;
                 white_ticks      = 0u;
                 dark_ticks[0]    = 0u;

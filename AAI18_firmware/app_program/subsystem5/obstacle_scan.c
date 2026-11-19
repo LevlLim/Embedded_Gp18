@@ -28,10 +28,24 @@
 #include "../drivers/gpio_irq.h"
 #include "../drivers/rp2040_regs.h"
 
+#ifndef S5_BEAM_HALF_DEG            /* see subsystem5.h */
+#define S5_BEAM_HALF_DEG        (10)
+#endif
+
 #define S5_OBSTACLE_QUEUE_DEPTH (2u)
 #define SERVO_FRAME_US          (20000u)   /* 50 Hz */
 #define SERVO_CLK_DIV           (125u)     /* 125 MHz / 125 = 1 us ticks */
 #define ECHO_WAIT_MS            (38)
+
+/* HC-SR04 clones can latch up if triggered while they are still powering
+   up, and then stay wrong (0 / a fixed ghost) until left alone: on this
+   car the reading was only right after reflashing, when the sensor had
+   sat idle for seconds.  So: no pings for the first US_WARMUP_MS after
+   boot, and after US_RECOVER_PINGS silent pings in a row, rest the sensor
+   (TRIG low) for US_RECOVER_MS. */
+#define US_WARMUP_MS            (2000u)
+#define US_RECOVER_PINGS        (10u)
+#define US_RECOVER_MS           (500u)
 
 typedef enum
 {
@@ -50,6 +64,17 @@ static ID h_mbf_obstacle = (ID)0;
 static volatile uint8_t request         = (uint8_t)S5_REQ_NONE;
 static volatile bool    b_forward_guard = false;
 static volatile uint8_t forward_cm      = 0u;
+/* Side reading (CR1 item 6): ONE word, bits 0-7 = cm (0 = none), bits
+   8-31 = ping count (wraps; only compared for change).  One store, one
+   load: the Controller can never pair a new count with an old cm. */
+#define S5_SIDE_CM_MASK         (0xFFu)
+#define S5_SIDE_COUNT_SHIFT     (8u)
+static volatile uint32_t side_word      = 0u;
+static volatile bool    b_scan_clipped  = false;  /* last profile's edge */
+                                                  /* at the arc's end    */
+/* Last profile's edges, cm from the car's centre line (CR1): two
+   saturated int8 in ONE 16-bit word, bits 0-7 left, 8-15 right. */
+static volatile uint16_t edges_word     = 0u;
 
 static s5_obstacle_phase_t phase = OB_IDLE;
 static int8_t   servo_angle   = 0;
@@ -211,6 +236,26 @@ static void apply_request(void)
         servo_point(0);
         phase = OB_COARSE_SCAN;
     }
+    else if ((S5_REQ_SIDE_L == req) || (S5_REQ_SIDE_R == req))
+    {
+        /* As far round as the wires allow (+ = right). */
+        servo_point((S5_REQ_SIDE_L == req) ? -S5_SERVO_LIMIT_DEG
+                                           : S5_SERVO_LIMIT_DEG);
+        settle_ticks = S5_SETTLE_TICKS;
+        phase        = OB_SIDE;
+    }
+    else if (S5_REQ_AHEAD == req)
+    {
+        servo_point(0);
+        phase = OB_HOLD;
+    }
+    else if (S5_REQ_MEASURE == req)
+    {
+        /* Straight ahead, every settled ping reported (OB_SIDE). */
+        servo_point(0);
+        settle_ticks = S5_SETTLE_TICKS;
+        phase        = OB_SIDE;
+    }
     else
     {
         /* No request. */
@@ -241,6 +286,12 @@ static void step_coarse(ping_result_t result, uint8_t distance_cm)
         servo_point(0);
         phase = OB_WAIT_STOP;
     }
+    else if (0 == S5_DRIVE_SWEEP)
+    {
+        /* Obstacles sit ON the track: look straight ahead while driving;
+           the wide sweep is only done once stopped (fine scan). */
+        servo_point(0);
+    }
     else
     {
         servo_point((int32_t)servo_angle
@@ -259,6 +310,42 @@ static void step_coarse(ping_result_t result, uint8_t distance_cm)
             /* Sweeping. */
         }
     }
+}
+
+/* Print the fine scan, and note whether the obstacle still reaches an
+   end of the arc: then its true edge was not seen and its width is only
+   "at least" (bench 17 Nov: a <15 cm obstacle at 29 cm filled the whole
+   +-30 degree arc and read 29 cm wide = 2 x 29 x sin 30). */
+static void log_scan(const msg_obstacle_t *p_profile)
+{
+    uint32_t band = (uint32_t)p_profile->distance_cm + S5_OBJECT_DEPTH_TOL_CM;
+    uint8_t  first = scan_cm[0];
+    uint8_t  last  = scan_cm[S5_FINE_STEPS - 1u];
+    UB       line[APP_LOG_MAX];
+    uint32_t idx;
+    uint8_t  pos = 0u;
+    INT      written;
+
+    line[0] = (UB)'\0';
+
+    for (idx = 0u; (idx < S5_FINE_STEPS) && (pos < (APP_LOG_MAX - 8u)); idx++)
+    {
+        written = tm_sprintf(&line[pos], (UB*)"%d ", (INT)scan_cm[idx]);
+        pos     = (written > 0) ? (uint8_t)(pos + (uint8_t)written) : pos;
+    }
+    APP_LOG((UB*)"[S5] scan %d..%d deg (cm): %s\n", (INT)-S5_FINE_ARC_DEG,
+            (INT)S5_FINE_ARC_DEG, line);
+
+    /* Only the end on the side the car will go round matters: an
+       obstacle running off the far end of the arc does not change the
+       bypass, so backing off for it just wasted time (test 10: three
+       reverses in a row for a block running off the LEFT end while the
+       car was going round on the RIGHT). */
+    b_scan_clipped = (0u != p_profile->distance_cm)
+                     && (((MSG_SIDE_LEFT == p_profile->side)
+                          && (0u != first) && ((uint32_t)first <= band))
+                         || ((MSG_SIDE_RIGHT == p_profile->side)
+                             && (0u != last) && ((uint32_t)last <= band)));
 }
 
 /* FINE_SCAN: one reading per step once the servo has settled. */
@@ -294,11 +381,17 @@ static void step_fine(uint8_t distance_cm)
         }
         else
         {
+            /* Range: the detection distance plus every back-off allowed,
+               so a rescan after backing off still finds the obstacle. */
             if (!s5_build_profile(scan_cm, S5_FINE_STEPS,
-                                  (uint8_t)PROV_D_DETECT_CM, &profile))
+                                  (uint8_t)(PROV_D_DETECT_CM
+                                            + ((S5_MAX_RETRIES
+                                                * S5_REVERSE_MM) / 10u)),
+                                  &profile))
             {
                 profile.distance_cm = 0u;   /* false alarm */
             }
+            log_scan(&profile);
 
             publish_profile(&profile);
             servo_point(0);
@@ -362,6 +455,32 @@ static int32_t step_angle(uint32_t idx)
 }
 
 /*
+ * Both sides equally open (usually both "unlimited", 31): the plain rule
+ * always said LEFT.  Go round the side the obstacle sticks out less on
+ * instead (x_sum = left edge + right edge, negative = left of the car),
+ * or a fixed side (S5_TIE_SIDE).
+ */
+static void tie_break_side(msg_obstacle_t *p_profile, int32_t x_sum)
+{
+    if ((MSG_SIDE_NONE != p_profile->side)
+        && (p_profile->clear_left_cm == p_profile->clear_right_cm))
+    {
+        if (1 == S5_TIE_SIDE)
+        {
+            p_profile->side = MSG_SIDE_LEFT;
+        }
+        else if (2 == S5_TIE_SIDE)
+        {
+            p_profile->side = MSG_SIDE_RIGHT;
+        }
+        else
+        {
+            p_profile->side = (x_sum < 0) ? MSG_SIDE_RIGHT : MSG_SIDE_LEFT;
+        }
+    }
+}
+
+/*
  * Free lateral room beyond one edge of the object: walk outward from the
  * edge until a return nearer than S5_CLEAR_RANGE_CM blocks it.
  *
@@ -373,6 +492,62 @@ static int32_t step_angle(uint32_t idx)
  * obstacle ended in back-off, rescan, abort (bench log).  If the object
  * itself reaches the scan edge, that side is unknown and NOT open.
  */
+/*
+ * Angle of an edge ray pulled in by the beam half-width.  inward = +1 for
+ * the left edge (towards higher angles), -1 for the right edge.
+ */
+static int32_t edge_angle(uint32_t idx, uint8_t steps, int32_t inward)
+{
+    int32_t angle = step_angle(idx);
+
+    if ((0u == idx) && (inward > 0))
+    {
+        /* Left end of the arc: the edge may be further out. */
+    }
+    else if (((uint32_t)steps == (idx + 1u)) && (inward < 0))
+    {
+        /* Right end of the arc. */
+    }
+    else if (inward > 0)
+    {
+        angle = angle + (int32_t)S5_BEAM_HALF_DEG;
+    }
+    else
+    {
+        angle = angle - (int32_t)S5_BEAM_HALF_DEG;
+    }
+
+    return (angle);
+}
+
+/* Lateral position of both beam-corrected edges, cm (left negative). */
+static void edge_x_cm(const uint8_t *p_distances_cm, uint8_t steps,
+                      uint32_t left, uint32_t right,
+                      int32_t *p_x_left, int32_t *p_x_right)
+{
+    int32_t angle_left  = edge_angle(left, steps, 1);
+    int32_t angle_right = edge_angle(right, steps, -1);
+
+    if (angle_left > angle_right)
+    {
+        angle_left  = (step_angle(left) + step_angle(right)) / 2;
+        angle_right = angle_left;
+    }
+    *p_x_left  = s5_lateral_cm(p_distances_cm[left], angle_left);
+    *p_x_right = s5_lateral_cm(p_distances_cm[right], angle_right);
+}
+
+/* Two edges, each saturated to int8 (+-127 cm), in one 16-bit word. */
+static uint16_t pack_edges(int32_t left_cm, int32_t right_cm)
+{
+    int32_t lo = (left_cm < -127) ? -127 : ((left_cm > 127) ? 127 : left_cm);
+    int32_t hi = (right_cm < -127) ? -127
+                 : ((right_cm > 127) ? 127 : right_cm);
+
+    return ((uint16_t)(((uint32_t)(uint8_t)(int8_t)hi << 8u)
+                       | (uint32_t)(uint8_t)(int8_t)lo));
+}
+
 static int32_t clearance_cm(const uint8_t *p_cm, uint8_t steps,
                             int32_t edge_x, uint32_t edge_idx, int32_t dir)
 {
@@ -456,8 +631,21 @@ EXPORT bool s5_build_profile(const uint8_t *p_distances_cm, uint8_t steps,
         right++;
     }
 
-    x_left  = s5_lateral_cm(p_distances_cm[left], step_angle(left));
-    x_right = s5_lateral_cm(p_distances_cm[right], step_angle(right));
+    /* The beam is S5_BEAM_HALF_DEG wide either side: an edge still echoes
+       until the beam's centre is that far past it, so pull each SEEN edge
+       back in by that angle.  An end at the arc limit is not corrected:
+       the real edge is further out.  If they cross, the object is
+       narrower than the beam: put both at the middle of the span. */
+    edge_x_cm(p_distances_cm, steps, left, right, &x_left, &x_right);
+
+    /* The beam is wide: an edge is still "seen" a little after the beam's
+       centre has passed it, so each edge reads S5_BEAM_SPREAD_CM too far
+       out.  Pull both in (never past each other). */
+    if ((x_right - x_left) > (2 * (int32_t)S5_BEAM_SPREAD_CM))
+    {
+        x_left  = x_left + (int32_t)S5_BEAM_SPREAD_CM;
+        x_right = x_right - (int32_t)S5_BEAM_SPREAD_CM;
+    }
 
     /* Saturating packing on every field (rule R5). */
     p_profile->distance_cm    = p_distances_cm[nearest];
@@ -480,6 +668,16 @@ EXPORT bool s5_build_profile(const uint8_t *p_distances_cm, uint8_t steps,
                                     p_profile->clear_right_cm,
                                     (uint8_t)(S5_ROBOT_WIDTH_CM
                                               + S5_CLEARANCE_MARGIN_CM));
+
+    tie_break_side(p_profile, x_left + x_right);
+
+    /* Where the edges really are, for the sideways leg.  The real edge
+       lies somewhere between the last ray that hit the object and the
+       next ray out, so allow one scan step beyond (always outward). */
+    edges_word = pack_edges(x_left - s5_lateral_cm(p_distances_cm[left],
+                                                   S5_STEP_DEG),
+                            x_right + s5_lateral_cm(p_distances_cm[right],
+                                                    S5_STEP_DEG));
 
     return (true);
 }
@@ -524,15 +722,103 @@ EXPORT ER s5_obstacle_init(void)
     return ((h_mbf_obstacle < E_OK) ? (ER)h_mbf_obstacle : E_OK);
 }
 
+/* Let the sensor finish powering up before the first trigger.
+   (app_now_ms is calendar time, not time since boot: measure from here --
+   this task starts at boot.) */
+static void warm_up(void)
+{
+    uint32_t warm_start_ms;
+
+    servo_point(0);
+    (void)gpio_set_val(PIN_US_TRIG, 0u);
+
+    warm_start_ms = app_now_ms();
+    while ((app_now_ms() - warm_start_ms) < US_WARMUP_MS)
+    {
+        (void)app_wait_period();
+    }
+}
+
+/* US_RECOVER_PINGS silent pings in a row: hold TRIG low and rest the
+   sensor, which recovers a module that locked up at power-up. */
+static void rest_if_silent(ping_result_t result, uint8_t *p_silent)
+{
+    *p_silent = (PING_MISSING == result) ? (uint8_t)(*p_silent + 1u) : 0u;
+
+    if (*p_silent >= US_RECOVER_PINGS)
+    {
+        APP_LOG((UB*)"[S5] ultrasonic not answering: resting it\n");
+        (void)gpio_set_val(PIN_US_TRIG, 0u);
+        (void)tk_dly_tsk((TMO)US_RECOVER_MS);
+        *p_silent = 0u;
+    }
+}
+
+/* One running cycle: the no-echo fault, then the scan phase. */
+static void run_phase(ping_result_t result, uint8_t distance_cm)
+{
+    /* A pulse that never comes means the sensor is not working: a DEGRADE
+       fault.  "Nothing in range" is normal and is not. */
+    missing_count = (PING_MISSING == result)
+                  ? (uint8_t)(missing_count + 1u) : 0u;
+    if (missing_count >= S5_NO_ECHO_LIMIT)
+    {
+        fault_set(FAULT_NO_ECHO);
+        missing_count = 0u;
+    }
+
+    switch (phase)
+    {
+        case OB_IDLE:
+            phase = OB_COARSE_SCAN;
+        break;
+
+        case OB_COARSE_SCAN:
+            step_coarse(result, distance_cm);
+        break;
+
+        case OB_FINE_SCAN:
+            step_fine(distance_cm);
+        break;
+
+        case OB_HOLD:
+            if (b_forward_guard)
+            {
+                check_dstop(distance_cm);
+            }
+        break;
+
+        case OB_SIDE:
+            /* Report every settled ping to the Controller. */
+            if (0u != settle_ticks)
+            {
+                settle_ticks = (uint8_t)(settle_ticks - 1u);
+            }
+            else
+            {
+                side_word = (((side_word >> S5_SIDE_COUNT_SHIFT) + 1u)
+                             << S5_SIDE_COUNT_SHIFT)
+                            | (is_valid_cm(distance_cm)
+                               ? (uint32_t)distance_cm : 0u);
+            }
+        break;
+
+        default:
+            /* OB_WAIT_STOP: the Controller is stopping the car. */
+        break;
+    }
+}
+
 EXPORT void obstacle_task(INT stacd, void *p_exinf)
 {
     ping_result_t result;
     uint8_t       distance_cm;
+    uint8_t       silent_pings = 0u;
 
     (void)stacd;
     (void)p_exinf;
 
-    servo_point(0);
+    warm_up();
 
     for (;;)
     {
@@ -540,6 +826,7 @@ EXPORT void obstacle_task(INT stacd, void *p_exinf)
 
         apply_request();
         result = ping(&distance_cm);
+        rest_if_silent(result, &silent_pings);
 
         if (is_ahead())
         {
@@ -569,41 +856,7 @@ EXPORT void obstacle_task(INT stacd, void *p_exinf)
         }
         else
         {
-            /* A pulse that never comes means the sensor is not working:
-               a DEGRADE fault.  "Nothing in range" is normal and is not. */
-            missing_count = (PING_MISSING == result)
-                          ? (uint8_t)(missing_count + 1u) : 0u;
-            if (missing_count >= S5_NO_ECHO_LIMIT)
-            {
-                fault_set(FAULT_NO_ECHO);
-                missing_count = 0u;
-            }
-
-            switch (phase)
-            {
-                case OB_IDLE:
-                    phase = OB_COARSE_SCAN;
-                break;
-
-                case OB_COARSE_SCAN:
-                    step_coarse(result, distance_cm);
-                break;
-
-                case OB_FINE_SCAN:
-                    step_fine(distance_cm);
-                break;
-
-                case OB_HOLD:
-                    if (b_forward_guard)
-                    {
-                        check_dstop(distance_cm);
-                    }
-                break;
-
-                default:
-                    /* OB_WAIT_STOP: the Controller is stopping the car. */
-                break;
-            }
+            run_phase(result, distance_cm);
         }
     }
 }
@@ -633,6 +886,28 @@ EXPORT int32_t s5_get_servo_angle(void)
 EXPORT uint8_t s5_get_obstacle_distance_cm(void)
 {
     return (forward_cm);
+}
+
+EXPORT bool s5_last_scan_clipped(void)
+{
+    return (b_scan_clipped);
+}
+
+EXPORT void s5_get_edges_cm(int32_t *p_left_cm, int32_t *p_right_cm)
+{
+    uint16_t word = edges_word;                 /* one load */
+
+    *p_left_cm  = (int32_t)(int8_t)(uint8_t)(word & 0xFFu);
+    *p_right_cm = (int32_t)(int8_t)(uint8_t)(word >> 8u);
+}
+
+EXPORT uint8_t s5_get_side_cm(uint32_t *p_count)
+{
+    uint32_t word = side_word;                  /* one load */
+
+    *p_count = word >> S5_SIDE_COUNT_SHIFT;
+
+    return ((uint8_t)(word & S5_SIDE_CM_MASK));
 }
 
 EXPORT void s5_obstacle_request(s5_request_t req)

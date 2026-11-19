@@ -39,6 +39,7 @@
 #include "../drivers/rp2040_regs.h"
 #include "../subsystem1/subsystem1.h"
 #include "../subsystem3/subsystem3.h"
+#include "../subsystem4/subsystem4.h"
 #include "../subsystem5/subsystem5.h"
 
 #ifndef S2_INNER_REVERSE_MAX_PCT        /* older subsystem2.h */
@@ -386,8 +387,22 @@ static bool move_complete(const gpio_irq_encoders_t *p_enc)
     b_right_done = (dir_r >= 0) ? (p_enc->count_right >= target_right)
                                 : (p_enc->count_right <= target_right);
 
-    b_left_done  = b_left_done  || (0u != (ctl & CTL_ENC_L_BAD_BIT));
-    b_right_done = b_right_done || (0u != (ctl & CTL_ENC_R_BAD_BIT));
+    /* Only one dead encoder can be ignored: with both marked bad nothing
+       would ever measure the move, so then trust the counts instead. */
+    if ((0u != (ctl & CTL_ENC_L_BAD_BIT))
+        && (0u == (ctl & CTL_ENC_R_BAD_BIT)))
+    {
+        b_left_done = true;
+    }
+    else if ((0u != (ctl & CTL_ENC_R_BAD_BIT))
+             && (0u == (ctl & CTL_ENC_L_BAD_BIT)))
+    {
+        b_right_done = true;
+    }
+    else
+    {
+        /* Both healthy, or both marked: use the encoder counts. */
+    }
 
     return (b_left_done && b_right_done);
 }
@@ -544,7 +559,21 @@ static void step_line_pid(void)
         b_fresh = true;
     }
 
-    if (b_fresh && !line.b_valid)
+    if (b_fresh && line.b_valid && b_last_valid && s3_barcode_reading()
+        && (line.error < S3_ERR_MIN) && (line.error > -S3_ERR_MIN))
+    {
+        /* Over a barcode on a straight, line between the sensors: steer
+           gently.  The bar widths come from the LEFT wheel, so a hard
+           steer or a pivot shrank them (test 8).  Only while centred: in
+           the loop the barcode sensor flickers along the line edge, and
+           holding there drove the car straight out of the circle. */
+        filtered_err_x8 += (((int32_t)line.error * 8) - filtered_err_x8)
+                         / S2_ERR_FILTER_DIV;
+        correction = motor_pid_step(0, filtered_err_x8 / 8, true)
+                   / S2_BC_STEER_DIV;
+        set_wheels_signed(base - correction, base + correction);
+    }
+    else if (b_fresh && !line.b_valid)
     {
         /* LOST: pivot gently toward where the line went -- outer wheel at
            the slow turn duty, inner wheel stopped.  (Was: PID at 3/4
@@ -725,6 +754,40 @@ static uint8_t step_state(const gpio_irq_encoders_t *p_enc)
     return (duty);
 }
 
+/*
+ * Side-ramp boost: rolled past S2_CLIMB_ROLL_DEG (the [DBG] "roll", -5)
+ * adds S2_CLIMB_BOOST_PCT to the cruise speed until roll is back above
+ * S2_CLIMB_OFF_DEG (-3; hysteresis: no flicker on the ramp's bumps).
+ * Rolling the other way is not boosted.
+ */
+static uint32_t climb_speed(uint32_t base_pct)
+{
+    static bool b_climbing = false;
+    int8_t      roll       = s4_get_roll_deg();
+    uint32_t    pct        = base_pct;
+
+    if (roll < S2_CLIMB_ROLL_DEG)
+    {
+        b_climbing = true;
+    }
+    else if (roll > S2_CLIMB_OFF_DEG)
+    {
+        b_climbing = false;
+    }
+    else
+    {
+        /* Between the two: keep the last decision. */
+    }
+
+    if (b_climbing)
+    {
+        pct = base_pct + S2_CLIMB_BOOST_PCT;
+        pct = (pct > 100u) ? 100u : pct;
+    }
+
+    return (pct);
+}
+
 /* ---------------------------------------------------------------------
  * Public
  * --------------------------------------------------------------------- */
@@ -770,6 +833,13 @@ EXPORT void motion_task(INT stacd, void *p_exinf)
         /* ---- 1. e-stop first ---- */
         fault_bits = fault_get();
 
+        /* A RESET clears FAULT_ENCODER: forget which wheel was bad too,
+           or every later encoder move would 'finish' without moving. */
+        if (0u == (fault_bits & FAULT_ENCODER))
+        {
+            ctl = ctl & ~(CTL_ENC_L_BAD_BIT | CTL_ENC_R_BAD_BIT);
+        }
+
         /* ---- 2. encoders (always, so odometry never skips a cycle) ---- */
         gpio_irq_read_encoders(&enc);
         update_odometry(&enc);
@@ -778,8 +848,8 @@ EXPORT void motion_task(INT stacd, void *p_exinf)
         {
             /* A DEGRADE fault caps the speed; clearing it restores it. */
             ctl_put(CTL_SETPT_SHIFT, CTL_PCT_BITS,
-                    (0u != (fault_bits & FAULT_MASK_DEGRADE))
-                    ? PROV_DEGRADE_PCT : PROV_CRUISE_PCT);
+                    climb_speed((0u != (fault_bits & FAULT_MASK_DEGRADE))
+                                ? PROV_DEGRADE_PCT : PROV_CRUISE_PCT));
 
             /* ---- 3. commands ---- */
             if (take_command(&cmd))

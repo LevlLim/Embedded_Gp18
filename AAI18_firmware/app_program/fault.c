@@ -95,7 +95,7 @@ EXPORT ER fault_wait_estop(uint16_t *p_bits, TMO timeout)
     /*
      * TWF_ORW  : wake on ANY bit in the mask.
      * No TWF_CLR: the bits are NOT consumed by this wait.  If they were,
-     * a second waiter would silently destroy a collision bit this waiter
+     * a second waiter would silently destroy an E-STOP bit this waiter
      * had not yet acted on.  Only fault_clear() removes a bit.
      */
     ercd = tk_wai_flg(h_flg_fault, (UINT)FAULT_MASK_ESTOP, TWF_ORW,
@@ -115,8 +115,8 @@ EXPORT const char *fault_name(uint16_t single_bit)
 
     switch (single_bit)
     {
-        case FAULT_COLLISION:
-            p_name = "COLLISION";
+        case FAULT_LIFTED:
+            p_name = "LIFTED";
         break;
 
         case FAULT_TILT:
