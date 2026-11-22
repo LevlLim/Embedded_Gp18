@@ -237,22 +237,6 @@ build you are flashing. Switching options needs no `make clean`. All of
 them are handled in **`build_make/pico_rp2040.mk`**. The CMake presets in
 step 2.2b set the same options.
 
-### Template files this project changes
-
-We changed four of the template's shared files. Each change is marked with
-an `AAI18` comment in the file:
-
-| File | Change | Why |
-|---|---|---|
-| `config/config.h` | `CNF_TIMER_PERIOD` 10 → **1** ms | the 1 ms barcode and 5 ms line tasks cannot run on a 10 ms tick |
-| `build_make/pico_rp2040.mk` | adds `TEST_BUDDY` | one self-test image per subsystem |
-| `lib/liblwip/sysdepend/pico_rp2040/lwipopts.h` | `MQTT_OUTPUT_RINGBUF_SIZE` 256 → 1024 | room for the `car18/log` console lines |
-| `lib/liblwip/sysdepend/pico_rp2040/mqtt_utk.c` | subscribes to `car18/cmd`, drains our telemetry outbox, passes commands to S1 | only the kernel's WiFi task may call lwIP / MQTT |
-
-We also added `CMakeLists.txt`, `CMakePresets.json`, `cmake/` and
-`pico-sdk-min/` for the CMake build (step 2.2b). The template's own README
-is kept as `TEMPLATE_README.md`.
-
 ---
 
 ## 4. Change Requirement 1 and coding standard
