@@ -1,337 +1,288 @@
-# INF2004 Group AAI18 — Autonomous Robot Car Firmware
+# INF2004 Group AAI18: autonomous robot car on micro T-Kernel 3.0
 
-Firmware for the Week 10 / Week 13 build, written against
-[INF2004_ProjectTemplate](https://github.com/sirfonzie/INF2004_ProjectTemplate)
-(micro T-Kernel 3.0 on the Raspberry Pi Pico W) and implementing
-**Design Review V2**, including **Change Requirement 1 (minimum-bit data
-representation)**.
+Firmware for our line-following robot car: micro T-Kernel 3.0 running on
+**both cores** of a Raspberry Pi Pico W (RP2040) on a Robo Pico board, with
+a USB serial console, and telemetry and remote control over WiFi / MQTT.
 
-> **Read this first.** This revision has been cross-compiled against the
-> real template, but it has **not been run on hardware**. See
-> [Status](#status-what-is-and-is-not-verified).
+The car follows a black line, reads Code 39 barcodes to choose its turn at
+the next junction, stops for an obstacle, measures it with a scanning
+ultrasonic sensor and drives around it, speeds up on the ramp, and stops
+its motors when it is lifted. Who owns what (subsystems, pins, priorities,
+interfaces) is in **[`TEAM.md`](TEAM.md)**.
 
----
-
-## Status: what is and is not verified
-
-| | |
-|---|---|
-| ✅ **Cross-compiles against the real template** | `arm-none-eabi-gcc` 13.2, zero warnings, with the Pico SDK 2.2.0: the default USB build (± `TEST=1`) and `NET=lwip MQTT=1`, via both `make` and CMake (identical `.uf2` files). |
-| ✅ **Host unit tests pass** | 90/90 checks, including 57 344 exhaustive motion-command round trips, saturation of every telemetry field, and the pure helpers of subsystems 3, 4 and 5. |
-| ✅ **Strict warnings clean** | `-Wall -Wextra -Wconversion -Wsign-conversion -Wshadow` against the stub headers, `TEST=0` and `TEST=1`. |
-| ❌ **Never run on hardware** | Every register offset, timing constant and threshold is from a datasheet or an estimate. |
-| ❌ **No measurement anywhere** | Everything marked `PROVISIONAL` is a guess that unblocks implementation. |
-
-**First bench session, in this order:** flash a `TEST=1` build with the
-car on blocks → read the self-test output → confirm the ADC reports 0
-overruns and the IMU answers on I²C → confirm the servo moves → *then* let
-a wheel turn.
+You need the car (or a bare Pico W), a USB cable, and a computer running
+macOS, Linux, or Windows. On Windows, either use **WSL (Ubuntu)** and run
+every command below inside it, or use the CMake build in step 2.2b,
+which needs no WSL.
 
 ---
 
-## Hardware note: ultrasonic on GP0/GP1
+## 1. Set up the Pico C SDK and the compiler
 
-The HC-SR04P is wired to **GP0 (TRIG)** and **GP1 (ECHO)** — the pins the
-template otherwise uses for its UART0 console. The template releases them
-only in the USB-console build with `CRASH_REPORT=0`, so **the console is
-always USB** in this project; `CONSOLE=uart` and `CRASH_REPORT=1` are
-refused at compile time. (Design Review V2 §2 still lists GP6/GP7; update
-the pin table there.)
+You need two separate things:
 
-## How to build and run
+| What | Why | Where it comes from |
+|---|---|---|
+| **Pico C SDK** | USB, WiFi and lwIP (TCP/IP, MQTT) driver source code | `git clone` (step 1.2), or the copy in `pico-sdk-min/` for the CMake build |
+| **Arm GNU Toolchain** (`arm-none-eabi-gcc`) | the compiler | a separate download (step 1.3) |
 
-### 1. Host tests (no robot)
+> ⚠️ **The SDK does NOT include the compiler.** You must install the compiler
+> on its own and put its `bin` folder on your `PATH` (step 1.4).
+
+**1.1 Install the basic tools: git, make and a host C++ compiler**
 
 ```sh
-cd testing/host
-make                 # every buddy's CR1 / pure-logic tests
-make test3           # one buddy only (test1 .. test5)
-make target-sizes    # sizeof() of the unpacked messages on the ARM target
+# macOS
+xcode-select --install
+
+# Linux / WSL (Ubuntu)
+sudo apt update && sudo apt install -y git make g++
 ```
 
-### Testing your own part (per buddy)
+**1.2 Download the Pico C SDK** (any folder works; this guide uses `~/pico`)
 
-Each buddy's folder has a **`TESTING.md`**: their files, the host tests,
-the on-car test, the bench checks still owed, and the settings to tune.
+```sh
+mkdir -p ~/pico && cd ~/pico
+git clone --branch 2.2.0 https://github.com/raspberrypi/pico-sdk.git
+cd pico-sdk
+git submodule update --init lib/tinyusb lib/cyw43-driver lib/lwip
+```
 
-| Buddy | Folder | Host | Car test image (CMake preset / make) |
-|---|---|---|---|
-| 1 | `subsystem1/` Telemetry | `make test1` | `test-b1` / `make TEST_BUDDY=1` |
-| 2 | `subsystem2/` Motion | `make test2` | `test-b2` / `make TEST_BUDDY=2` (car on blocks) |
-| 3 | `subsystem3/` Line + Barcode | `make test3` | `test-b3` / `make TEST_BUDDY=3` |
-| 4 | `subsystem4/` IMU | `make test4` | `test-b4` / `make TEST_BUDDY=4` |
-| 5 | `subsystem5/` Obstacle + Controller | `make test5` | `test-b5` / `make TEST_BUDDY=5` |
+The `submodule` line is required: it downloads the USB and WiFi drivers,
+plus `lib/lwip` for our MQTT build. Only the CMake build (step 2.2b) can
+skip this step: it uses `pico-sdk-min/`, the parts of SDK 2.2.0 it needs.
 
-A `TEST_BUDDY=N` image is `mtk3pico_smp1_usb_cdc_wifi_test_bN.uf2`. The
-whole car runs as normal; once the boot calibration has finished, only Buddy N's
-`subsystemN_test()` runs. Some tests are hands-on and say so on the
-console (slide the car across the line, tilt it, move a hand in front).
-`TEST=1` still runs every buddy's test in one image.
+**1.3 Install the Arm GNU Toolchain (the compiler)**
 
-### 2. Firmware
+- **macOS / Windows (WSL) / Linux:** download from
+  <https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads>.
+  Pick the **AArch32 bare-metal target (arm-none-eabi)** package for your
+  computer. For WSL, choose the **Linux x86_64** `.tar.xz`.
+  Extract it, e.g. to `~/tools/arm-gnu-toolchain-<version>/`.
+- **Linux / WSL shortcut:** `sudo apt install -y gcc-arm-none-eabi`
+  installs it straight onto your PATH. If you use this, skip the PATH line in 1.4.
+- **Windows without WSL:** install **Pico - Visual Studio Code**. It
+  provides the compiler, CMake, Ninja and Python for step 2.2b.
 
-1. Install `make` and the Arm GNU toolchain (`arm-none-eabi-gcc`).
-2. Clone the template, then copy this project over it — **both folders**:
+**1.4 Tell your shell where the compiler and SDK are**
 
-   ```sh
-   git clone https://github.com/sirfonzie/INF2004_ProjectTemplate.git
-   rm -rf INF2004_ProjectTemplate/app_program
-   cp -r app_program INF2004_ProjectTemplate/
-   cp -r template_patches/. INF2004_ProjectTemplate/     # see below
-   ```
+Add these two lines to the end of `~/.zshrc` (macOS) or `~/.bashrc` (Linux/WSL),
+**changing both paths to match your computer**:
 
-3. Build (in `INF2004_ProjectTemplate/build_make`):
+```sh
+export PATH="$HOME/tools/arm-gnu-toolchain-15.3.rel1/bin:$PATH"   # folder that contains arm-none-eabi-gcc
+export PICO_SDK_PATH="$HOME/pico/pico-sdk"                         # the SDK from step 1.2
+```
 
-   | Build | Command | Needs |
-   |---|---|---|
-   | Normal (USB console) | `make -j8` | `PICO_SDK_PATH` set |
-   | Self-tests, all buddies | add `TEST=1` | **car on blocks** |
-   | Self-test, one buddy | add `TEST_BUDDY=1`..`5` | see that buddy's `TESTING.md` |
-   | MQTT telemetry | `make NET=lwip MQTT=1 -j8` | SDK + `config/wifi_secrets.h` (copy the example) |
+Open a **new** terminal, then check both:
 
-4. Hold **BOOTSEL**, plug in, copy the `.uf2` from `build_make/` to the drive.
-5. Open the console at 115200 baud (`screen /dev/ttyACM0 115200`, or PuTTY).
+```sh
+arm-none-eabi-gcc --version     # must print a version, not "command not found"
+ls $PICO_SDK_PATH               # must list the SDK files
+```
 
-Without `MQTT=1`, telemetry frames print to the console as hex, so bring-up
-needs no broker.
+---
 
-### 3. Windows without WSL: CMake build (Pico – Visual Studio Code)
+## 2. Clone this repo and build the `.uf2` file
 
-The **`AAI18_firmware` folder is ready to build as it is**: it already
-contains the course template, this project's code with the template
-patches applied, and `pico-sdk-min/` (the parts of Pico SDK 2.2.0 the
-build uses: TinyUSB, the CYW43 Wi-Fi driver and lwIP). Nothing to clone.
-It needs only CMake, Ninja, `arm-none-eabi-gcc` and Python, which the
-"Pico - Visual Studio Code" program provides.
+**2.1 Clone the project**
 
-1. Open **Pico - Visual Studio Code** (the Start-menu shortcut, so the
-   compiler is on PATH), then **File → Open Folder… → `AAI18_firmware`**.
-2. In the CMake side panel, **Configure preset** → pick one:
+```sh
+cd ~/pico
+git clone https://github.com/LevlLim/Embedded_Gp18.git
+cd Embedded_Gp18/AAI18_firmware
+```
 
-   | Preset | Builds | UF2 |
-   |---|---|---|
-   | `usb` | normal driving firmware | `build\usb\mtk3pico_smp1_usb_cdc_wifi.uf2` |
-   | `test-b1` … `test-b5` | one buddy's self-test | `build\test-bN\mtk3pico_smp1_usb_cdc_wifi_test_bN.uf2` |
-   | `usb-test` | every buddy's self-test | `build\usb-test\…_test.uf2` |
-   | `mqtt` | MQTT telemetry (needs `config\wifi_secrets.h`) | `build\mqtt\…_lwip_mqtt.uf2` |
+For the MQTT build only: copy `config/wifi_secrets.example.h` to
+`config/wifi_secrets.h` and fill in the WiFi name, password and the
+broker's IP address. This file is git-ignored: **never commit it.**
 
-3. Click **Build** (or press F7). The `.uf2` appears in `build\<preset>\`.
+**2.2a Build with make** (macOS, Linux, WSL)
 
-From a terminal in that folder: `cmake --preset test-b3` then
-`cmake --build --preset test-b3`. The CMake and make builds give
-byte-identical `.uf2` files. Using your own full SDK instead: set
-`AAI18_PICO_SDK_PATH` in `CMakePresets.json`. There are no `uart` presets:
-GP0/GP1 carry the ultrasonic sensor, so the UART console is refused.
+```sh
+cd build_make
+make -j8
+```
 
-### 4. Wireless console over Wi-Fi (MQTT)
+Your firmware is **`build_make/mtk3pico_smp1_usb_cdc_wifi.uf2`**. For WiFi
+telemetry and remote control, build `make NET=lwip MQTT=1 -j8` instead
+(→ `mtk3pico_smp1_usb_cdc_wifi_lwip_mqtt.uf2`). Other builds are in
+section 3.
 
-To read the car's console without a USB cable:
+If `make` stops with an error, it tells you which one is wrong:
+`arm-none-eabi-gcc not found` means fix `PATH`, and
+`PICO_SDK_PATH is not set` means fix `PICO_SDK_PATH` (step 1.4).
 
-1. Phone hotspot on **2.4 GHz** (or any WPA2 network with no username);
-   connect the laptop to it and note its IPv4 address (`ipconfig`).
-2. Copy `config\wifi_secrets.example.h` to `config\wifi_secrets.h` and set
-   `WIFI_SSID`, `WIFI_PASSWORD` and `MQTT_BROKER_IP` (the laptop's IP).
-   This file is git-ignored: never commit it.
-3. Install Mosquitto on the laptop, create `car.conf` with
-   `listener 1883 0.0.0.0` and `allow_anonymous true`, run
-   `mosquitto -c car.conf -v` (allow it through the firewall).
-4. Build the **`mqtt`** preset and flash its `.uf2`.
-5. Read the console: `mosquitto_sub -h localhost -t car18/log`
-   (every `[DBG]`, `[S3]`, `[S4]`, `[S5]` line, as on the USB console).
-   Binary telemetry is on `car18/tele/#`.
-6. Control the car from the laptop:
-   `mosquitto_pub -h <broker> -t car18/cmd -m start` (or `stop`, `reset`).
-   The 2-byte binary form `[seq][cmd]` (CR1) is still accepted.
-   Calibration moves while parked: `left` / `right` (90° turn), `fwd`
-   (500 mm), `back` (200 mm) -- check turns against `S2_TRACK_WIDTH_MM`
-   and distances against `S2_WHEEL_DIAM_MM`.
+**2.2b Build with CMake** (Windows without WSL, or any computer)
 
-### `template_patches/` — template files this project changes or adds
+Open **Pico - Visual Studio Code**, then **File → Open Folder… →
+`AAI18_firmware`**. In the CMake side panel pick a **Configure preset**,
+then click **Build** (F7):
+
+| Preset | Builds | `.uf2` |
+|---|---|---|
+| `usb` | normal driving firmware | `build/usb/mtk3pico_smp1_usb_cdc_wifi.uf2` |
+| `mqtt` | driving firmware + WiFi telemetry, log and remote control | `build/mqtt/mtk3pico_smp1_usb_cdc_wifi_lwip_mqtt.uf2` |
+| `usb-test` | every subsystem's self-test | `build/usb-test/..._test.uf2` |
+| `test-b1` … `test-b5` | one subsystem's self-test | `build/test-bN/..._test_bN.uf2` |
+
+From a terminal: `cmake --preset mqtt`, then `cmake --build build/mqtt`.
+The CMake build uses `pico-sdk-min/`, so it needs no `PICO_SDK_PATH`.
+
+**2.3 Flash it onto the Pico W**
+
+1. Hold the **BOOTSEL** button and plug the Pico W into USB, then release.
+   A drive called **RPI-RP2** appears.
+2. Copy the `.uf2` file onto that drive. On WSL, run `explorer.exe .` in
+   `build_make` to open the folder in Windows. The Pico reboots by itself.
+
+**2.4 See the output and drive the car**
+
+Open the Pico's USB serial port at 115200 baud:
+
+```sh
+screen /dev/tty.usbmodem* 115200      # macOS   (quit: Ctrl-A then K)
+screen /dev/ttyACM0 115200            # Linux
+```
+
+On Windows, use PuTTY or the VS Code *Serial Monitor* on the new COM port.
+After the line sensors calibrate you see regular `[DBG]` status lines
+(sensor readings, line error, motor duty, pitch / roll, encoder counts,
+ultrasonic distance, mission state, fault word) and `[S3]`, `[S4]`,
+`[S5]` event lines. Press the Robo Pico's **START** button (GP20) to
+drive and **STOP** (GP21) to stop.
+
+**Without a USB cable (MQTT build):** run a Mosquitto broker on a laptop
+on the same 2.4 GHz network (`listener 1883 0.0.0.0` and
+`allow_anonymous true` in its config file), then:
+
+```sh
+mosquitto_sub -h <laptop IP> -t car18/log                 # the console, over WiFi
+mosquitto_pub -h <laptop IP> -t car18/cmd -m start        # or stop, reset
+```
+
+Binary telemetry (12 bytes, 5 Hz) is published on `car18/tele/#`. While
+the car is parked, `fwd`, `back`, `left` and `right` make calibration moves.
+
+**2.5 Where the code is**
+
+Our code lives in **`app_program/`**. Every `.c` file there, and in its
+subfolders, is compiled automatically.
+
+- **`app_main.c` → `usermain()` is where the program starts.** It calls
+  every subsystem's `subsystemN_init()` (create kernel objects), then every
+  `subsystemN_start()` (start tasks).
+- **One folder per student**, each with `subsystemN.h` (its public
+  interface), `subsystemN_test.c` (its self-test) and `TESTING.md` (how to
+  test it):
+
+  | Folder | Subsystem | Owner | Tasks |
+  |---|---|---|---|
+  | `subsystem1/` | Telemetry & Comms | Levl Lim | `telemetry_task` (200 ms, core 1) |
+  | `subsystem2/` | Motion Control | Ze Kai | `motion_task` (10 ms) |
+  | `subsystem3/` | Line & Barcode Sensing | Zhi Kai | `line_task` (5 ms), `barcode_task` (1 ms) |
+  | `subsystem4/` | IMU / Terrain | Jian Yan | `imu_task` (10 ms) |
+  | `subsystem5/` | Vehicle Controller & Obstacle | Jun Hong | `controller_task` (event-driven), `obstacle_task` (60 ms) |
+
+- `app.h` holds the definitions shared by the whole team: pin map, task
+  priorities and periods.
+- `msg_defs.h/.c` holds every packed message and field (Change Requirement
+  1). `fault.h/.c` holds the 10-bit shared fault table.
+- Drivers are in their owner's subsystem folder (`subsystem2/motor_control.c`,
+  `subsystem3/adc_sampler.c`, `subsystem4/i2c0.c`). The exception is the
+  GPIO interrupt dispatcher shared by S2 (encoders) and S5 (ultrasonic
+  echo), which is in `app_program/drivers/`. Nothing was added under `device/`.
+
+**Working as a team:** owners, pins, peripherals, priorities and the
+interfaces between subsystems are in **`TEAM.md`**. On-car self-tests are
+in each `subsystemN_test.c` (section 3: `TEST`, `TEST_BUDDY`). Host unit
+tests are in **`testing/host/`**: `make` there runs all of them on a PC
+with no robot, and `make test1` … `make test5` runs one subsystem's. Test
+and demo videos are listed in **`videos/`**.
+
+Pins: every pin is claimed in `TEAM.md`. **GP0/GP1 carry the ultrasonic
+sensor**, so this project always uses the USB console and cannot build
+with `CONSOLE=uart` or `CRASH_REPORT=1` (`app.h` refuses to compile).
+GP23/GP24/GP25/GP29 are the Pico W radio and are never used.
+
+After editing, build again (step 2.2a or 2.2b) and copy the new `.uf2`.
+
+---
+
+## 3. Build options: `SMP`, `CONSOLE`, `WIFI`, `TEST`, `TEST_BUDDY`, `CRASH_REPORT`, `NET`, `MQTT`
+
+`make` on its own uses the defaults. To build differently, put options
+after `make`. They can be combined in any order:
+
+```sh
+make -j8                          # defaults: SMP=1 CONSOLE=usb_cdc WIFI=cyw43 TEST=0 CRASH_REPORT=0
+make NET=lwip MQTT=1 -j8          # WiFi telemetry, log and remote control (needs config/wifi_secrets.h)
+make TEST=1 -j8                   # every subsystem's self-test (car on blocks)
+make TEST_BUDDY=3 -j8             # only subsystem 3's self-test
+```
+
+| Option | Values (**default**) | What it does | Image name | C macro your code can test |
+|---|---|---|---|---|
+| `SMP` | `0`, **`1`** | `1` runs the kernel on both RP2040 cores; `0` uses core 0 only. Our task layout needs `1` (telemetry runs on core 1). | `smp1` / `smp0` | `TK_SUPPORT_SMP` |
+| `CONSOLE` | **`usb_cdc`**, `uart` | where `tm_printf` output goes. **Only `usb_cdc` works here**: GP0/GP1 are the ultrasonic sensor. | `_usb_cdc` | `TM_CONSOLE_USB_CDC` |
+| `WIFI` | **`cyw43`**, `none` | `cyw43` powers up the Pico W radio and its driver task | `_wifi` / *(nothing)* | `TM_WIFI_CYW43` |
+| `TEST` | **`0`**, `1` | `1` compiles every `subsystemN_test.c` and runs them after the boot calibration | `_test` / *(nothing)* | `APP_TEST` |
+| `TEST_BUDDY` | **`0`**, `1`–`5`, `6` | *added by us:* `1`–`5` runs only that subsystem's self-test (implies `TEST=1`); `6` is the ultrasonic bench test | `_test_bN` / `_test_us` | `APP_TEST_BUDDY` |
+| `CRASH_REPORT` | **`0`**, `1` | copies the console to UART0 on GP0/GP1. **Refused in this project** (GP0/GP1 are the ultrasonic). | `_crash` | `TM_CONSOLE_UART` |
+| `NET`, `MQTT` | *(off)*, `NET=lwip MQTT=1` | TCP/IP and the MQTT client inside the kernel's WiFi task. Needs the SDK's `lib/lwip` and `config/wifi_secrets.h`. | `_lwip_mqtt` | `TM_NET_LWIP`, `TM_MQTT` |
+
+The options are part of the image name, e.g.
+`mtk3pico_smp1_usb_cdc_wifi_test_b3.uf2`, so you can always tell which
+build you are flashing. Switching options needs no `make clean`. All of
+them are handled in **`build_make/pico_rp2040.mk`**. The CMake presets in
+step 2.2b set the same options.
+
+### Template files this project changes
+
+We changed four of the template's shared files. Each change is marked with
+an `AAI18` comment in the file:
 
 | File | Change | Why |
 |---|---|---|
-| `config/config.h` | `CNF_TIMER_PERIOD` 10 → **1** | The 1 ms barcode and 5 ms line tasks cannot exist on a 10 ms tick. `app.h` refuses to compile until this is applied. |
-| `lib/liblwip/sysdepend/pico_rp2040/lwipopts.h` | `MQTT_OUTPUT_RINGBUF_SIZE` 256 → 1024 | Room for the `car18/log` text lines. |
-| `lib/liblwip/sysdepend/pico_rp2040/mqtt_utk.c` | Subscribes to `car18/cmd`; drains the telemetry outbox into `mqtt_publish()`; passes raw inbound bytes and link up/down to the application | lwIP is `NO_SYS` and owned by the radio task, so only that task may call it. Only used in `MQTT=1` builds. |
-| `CMakeLists.txt`, `CMakePresets.json`, `cmake/` | **New.** CMake/Ninja build equal to the makefile, plus a Python `elf2uf2`; presets `test-b1`..`test-b5` | Build on Windows with no WSL and no host C++ compiler. |
-| `build_make/pico_rp2040.mk` | Adds `TEST_BUDDY=0..5` (passes `APP_TEST_BUDDY`, names the image `_test_bN`) | One self-test image per buddy. |
+| `config/config.h` | `CNF_TIMER_PERIOD` 10 → **1** ms | the 1 ms barcode and 5 ms line tasks cannot run on a 10 ms tick |
+| `build_make/pico_rp2040.mk` | adds `TEST_BUDDY` | one self-test image per subsystem |
+| `lib/liblwip/sysdepend/pico_rp2040/lwipopts.h` | `MQTT_OUTPUT_RINGBUF_SIZE` 256 → 1024 | room for the `car18/log` console lines |
+| `lib/liblwip/sysdepend/pico_rp2040/mqtt_utk.c` | subscribes to `car18/cmd`, drains our telemetry outbox, passes commands to S1 | only the kernel's WiFi task may call lwIP / MQTT |
+
+We also added `CMakeLists.txt`, `CMakePresets.json`, `cmake/` and
+`pico-sdk-min/` for the CMake build (step 2.2b). The template's own README
+is kept as `TEMPLATE_README.md`.
 
 ---
 
-## Layout
+## 4. Change Requirement 1 and coding standard
 
-```
-app_program/
-  app.h                  pin map, priorities, periods, PROVISIONAL constants,
-                         message-buffer sizing macro, periodic-task helpers
-  app_main.c             usermain(), task + cyclic-handler creation,
-                         which buddy's self-test runs (APP_TEST_BUDDY)
-  msg_defs.h/.c          ★ CR1: every packed field, encode/decode  (Buddy 1)
-  fault.h/.c             ★ CR1: the 10-bit shared fault bitmask    (Buddy 5)
-  drivers/               shared by more than one buddy
-    rp2040_regs.h        registers the template's BSP does not provide
-    gpio_irq.h/.c        single IO_BANK0 dispatcher             (Buddy 2 + 5)
-  subsystem1/  Buddy 1   Telemetry / Comms — WiFi, MQTT, remote cmds
-  subsystem2/  Buddy 2   Motion Control — motors, encoders, PID, e-stop
-  subsystem3/  Buddy 3   Line + Barcode — adc_sampler (sole ADC owner),
-                         line sensor, barcode decode
-  subsystem4/  Buddy 4   IMU / Terrain — i2c0 (sole I²C0 owner), hump,
-                         tilt, collision
-  subsystem5/  Buddy 5   Obstacle + Vehicle Controller — mission state
-  (each subsystemN/ has subsystemN_test.c and TESTING.md)
-template_patches/        template files this project changes or adds
-testing/
-  host/                  PC unit tests + target sizeof probe
-  stub/                  fake kernel headers for host checks only
-```
+**Change Requirement 1 (minimum-bit data):** every packed field, with its
+bit width, range and saturation, is in `app_program/msg_defs.h`, checked at
+compile time:
 
----
+- motion command 2 B, barcode command 1 B, obstacle profile 5 B;
+- telemetry frame 12 B, MQTT command 2 B `[seq][cmd]`, fault word 10 bits;
+- line reading one 32-bit word, mission state 5 bits, controller state one
+  bit-field struct (41 bits).
 
-## Timing model
+Data shared between tasks is either one word with a single writer or
+passed through a kernel object. To run the host tests:
+`cd testing/host && make`.
 
-Every periodic task is woken by its own **cyclic handler**
-(`app_start_periodic_task()`), and loops on `app_wait_period()`. Periods
-therefore do not drift with execution time, and an overrun is reported
-once instead of replayed. This replaces `tk_dly_tsk()` loops, which on the
-template's 10 ms tick turned every "1/5/10 ms" task into ~20 ms.
-
-Core 0 runs every driving task; core 1 runs Telemetry. The template's
-WiFi/lwIP task is also on core 0, at priority 4 — **above** Motion Control —
-so NFR6 depends on that task being short; measure it in T6.
-
-Anything read across cores is either a single aligned word or protected
-by a kernel object. `DI()` masks interrupts on the calling core only, so it
-is never relied on for data Telemetry reads.
-
----
-
-## Change Requirement 1: where it lives
-
-| CR1 requirement | Where |
-|---|---|
-| Minimum bits per field | `msg_defs.h` (widths, ranges, static asserts) |
-| 1. Motion control data | `task_motion.c`: mode, directions, duty, setpoint, sequence and encoder health in **one 27-bit control word** |
-| 2. Line and barcode sensing | Line reading = **one 32-bit word** (7-bit error, valid, 24-bit ms stamp). ADC ring = **one word per sample** (12-bit value + 20-bit µs stamp). Barcode widths `uint16_t`. |
-| 3. Obstacle detection | 5-byte profile; profiling sweep stored as 25 × `uint8_t` cm |
-| 4. Hump estimation | Peak + SAT flag in **one byte** (`msg_pack_hump`) |
-| 5. Vehicle / controller states | Mission state stored **only** as its 5-bit encoded byte |
-| 6. Shared task / ISR data | Single-word records (no lock needed); Motion→Telemetry fields under a `TA_INHERIT` mutex; encoder total single-writer, differenced by the reader |
-| 7. Inter-task messages | Motion 2 B, barcode 1 B, obstacle 5 B — buffers sized for the kernel's 4-byte header (`APP_MBF_BUFSZ`) |
-| 8. MQTT payloads | 12-byte binary telemetry (schema v2), 2-byte fault word, 1-byte heartbeat, **2-byte binary commands** `[seq][cmd]` |
-| Fault conditions | `fault.h` — 10 bits, severity masks, set/clear discipline |
-| Race-free packed access | Single writer per word (rule R1); `tk_set_flg` ORs fault bits; requests to another task are flags it applies itself |
-| Saturation (R5) | Every pack function clamps; every unpack rejects undefined codes |
-
-### Measured figures
-
-**Message size** (`make target-sizes` on `arm-none-eabi-gcc`, which uses 1-byte enums):
-
-| Message | Unpacked `sizeof` | Packed | Kernel buffer slot, unpacked → packed |
-|---|---|---|---|
-| Motion command | 6 B | 2 B | 12 → 8 B |
-| Barcode command | 3 B | 1 B | 8 → 8 B |
-| Obstacle profile | 7 B | 5 B | 12 → 12 B |
-| Telemetry frame | 18 B (struct) | 12 B | — |
-| Line reading (shared record) | 12 B | 4 B | — |
-
-Inside a µT-Kernel message buffer each message costs a 4-byte header plus
-its body rounded up to 4 bytes, so packing the barcode and obstacle
-messages saves no buffer RAM. Their gain is the bit-level validation, not
-bytes. Report it that way.
-
-**Application static RAM** (`arm-none-eabi-size` over `app_program` objects):
-**2,488 B → 1,424 B** (data + bss), mostly from the ADC ring
-(2,048 → 1,024 B). Task stacks (7 × 2,048 B) and kernel objects come from
-the kernel heap and are not in that figure; count them separately.
-
-**Still owed:** a true *before* build. The original code never ran, so the
-honest baseline is a compile-time variant with plain structs, a `bool` per
-fault and JSON telemetry, measured the same way. Per-task WCET and CPU
-(NFR13, T6) need hardware.
-
-### Fields deliberately NOT packed
-
-Encoder counters, ECHO timestamps and intermediate PID / odometry / tilt
-maths stay native 32-bit (Design Review §7.4): a free-running counter's
-valid range *is* 32 bits, and packing them would buy a few bytes and pay
-with torn reads in the 1 ms and 10 ms paths.
-
----
-
-## Barr-C:2018 compliance
-
-Scripted checks, all passing: 0 tabs, 0 CRLF, 0 lines over 80 columns,
-braces on their own lines (1.3), one statement per line (3.3a), end-of-file
-comments (3.3c), names of 3+ characters (7.1e), `b_`/`p_`/`h_` prefixes
-(7.1k–n), no `continue` (1.7d), no function over 100 lines (6.2a), ISR named
-`_isr` (6.5b), constants on the left of `==` (8.6a), `default` in every
-`switch` (8.3b), fixed-width types (5.2), header guards (4.2b).
-
-Globals: kernel object IDs are now `static` handles (`h_…`) private to the
-file that uses them, reached through accessor functions, so no variable is
-declared `extern` in a header (4.2c, 7.1j).
-
-### Declared deviations
+**BARR-C:2018:** all application code follows it, with these declared
+deviations:
 
 | ID | Rule | Deviation and reason |
 |---|---|---|
-| D2 | 5.1a | `ER`, `ID`, `UINT`… come from µT-Kernel and cannot be renamed. |
+| D2 | 5.1a | `ER`, `ID`, `UINT`… come from micro T-Kernel and cannot be renamed. |
 | D3 | 1.1 | `//` comments are permitted; new code uses `/* */`. |
-| D4 | — | The template's own files use tabs; they were not reformatted (including the patched `mqtt_utk.c`). |
-| D5 | 6.3a | Function-like macros are kept where a compile-time constant is needed: register addresses (`PADS_GPIO`, `PWM_SLICE_DIV`, …), `APP_MBF_BUFSZ`, `MSG_STATIC_ASSERT`, and `CHECK` (passes its call-site text). |
-| D6 | 1.6a | Not every cast carries a comment. Casts that reinterpret a bit pattern are commented; plain widening/narrowing of an already range-checked value is not. |
-
-(D1, the five over-length functions, is resolved: each was split.)
+| D4 | — | The template's own files keep their tabs (including the patched `mqtt_utk.c`). |
+| D5 | 6.3a | Function-like macros only where a compile-time constant is needed (register addresses, `APP_MBF_BUFSZ`, `MSG_STATIC_ASSERT`, the test `CHECK`). |
+| D6 | 1.6a | Casts that reinterpret a bit pattern are commented; plain widening or narrowing of an already range-checked value is not. |
 
 ---
 
-## Known weak points (be ready to be asked)
-
-1. **Barcode encoding is a placeholder** (risk R5). `s3_decode_widths()`
-   uses a 4-element scheme that must be replaced once the real symbols are
-   measured. Sampling is now 500 S/s per channel (2 ms resolution).
-2. **Hump height from accelerometer-only tilt** (A7). No gyroscope.
-3. **D_detect, D_stop and all bypass geometry are guesses.** Leg
-   distances come from `S5_ROBOT_*` and the profile; measure them.
-4. **Servo may face away when an obstacle appears** (risk R6).
-5. **Encoder ISR cost unknown** (risk R8); `gpio_irq_max_duration_us()`.
-6. **Quadrature counts one channel only** (half resolution).
-7. **Counts per revolution measured (left 1260, right 776); wheel diameter and track width still nominal.** The two sides differ consistently -- check both motors are the same model.
-8. **No closed-loop wheel-speed PID yet (NFR1).** Moves run at a fixed
-   duty; the PID only steers in line following.
-9. **MQTT path never run against a broker.** It compiles and links with
-   the real lwIP; QoS 1 command delivery, reconnect timing (10 s, NFR6)
-   and the outbox under load are untested.
-10. **ADC is polled, not DMA.** Adequate at 1.5 kS/s; the design's DMA ring
-    is the upgrade path if more resolution is needed.
-11. **Status LED and buzzer are not implemented.**
-
----
-
-## Test plan coverage
-
-| Test | What | Where | Status |
-|---|---|---|---|
-| T2 | Packed field min/max/out-of-range, enum rejection | `testing/host` | ✅ automated |
-| T3 | Obstacle profile round trip + profile builder | `testing/host` | ✅ automated (logic); bypass video owed |
-| T4 | Fault bitmask | `subsystem5_test.c` | ⚠ sequential only — needs concurrent setters on both cores + an ISR |
-| T5 | E-stop latency | `subsystem2_test.c` | ⚠ software path only; logic-analyser capture owed |
-| T6 | CPU and deadlines | `app_wait_period()` returns missed periods | ⚠ instrumentation exists, not yet logged |
-| T7 | Shared ADC integrity | `subsystem3_test.c` (overrun count must be 0) | on target |
-| T8 | Stale line error | `msg_line_age_ms()` tested on host | ⚠ on-target suspend test not written |
-
----
-
-## Ownership
-
-Only the owner edits a subsystem folder. `app.h`, `app_main.c`,
-`msg_defs.*`, `fault.*` and `template_patches/` are shared — change them by
-agreement.
-
-| # | Buddy | Owns |
-|---|---|---|
-| 1 | Levl Lim (2501118) | `subsystem1/`, **`msg_defs.*`**, `mqtt_utk.c` patch |
-| 2 | Ze Kai (2501273) | `subsystem2/`, `drivers/gpio_irq.*` (shared with Buddy 5) |
-| 3 | Zhi Kai (2500466) | `subsystem3/` (incl. `adc_sampler.*`) |
-| 4 | Jian Yan (2500853) | `subsystem4/` (incl. `i2c0.*`) |
-| 5 | Jun Hong (2501666) | `subsystem5/`, **`fault.*`** |
+*micro T-Kernel 3.0 © Ken Sakamura / TRON Forum, distributed under the
+T-License 2.2. This dual-core RP2040 port is derived from the official
+μT-Kernel 3.0 BSP (`tron-forum/mtk3_bsp`, branch `pico_rp2040`).*
