@@ -10,6 +10,8 @@
  * harmless failure value so an accidental call is visible, not silent.
  */
 
+#include <string.h>
+
 #include "app.h"
 #include "subsystem3/adc_sampler.h"
 #include "drivers/gpio_irq.h"
@@ -49,6 +51,10 @@ bool gpio_irq_read_echo(gpio_irq_echo_t *p_out)
 {
     (void)p_out;
     return (false);
+}
+void gpio_irq_read_encoders(gpio_irq_encoders_t *p_out)
+{
+    (void)memset(p_out, 0, sizeof(*p_out));
 }
 ER gpio_set_pin(UINT no, UINT mode) { (void)no; (void)mode; return (E_OBJ); }
 ER gpio_set_val(UINT no, UINT val) { (void)no; (void)val; return (E_OBJ); }

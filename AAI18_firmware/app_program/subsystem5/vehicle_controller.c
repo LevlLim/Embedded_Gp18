@@ -52,7 +52,7 @@
 #define VC_LEG_PATHCHK          (10u)   /* after leg 4: way to line clear?*/
 #define VC_LEG_UNTURN           (11u)   /* not passed yet: parallel again */
 #define VC_LEG_STEP             (12u)   /* ...a step further on           */
-#define VC_LEG_NONE             (0xFFu)
+#define VC_LEG_NONE             (15u)   /* fits the 4-bit leg field */
 #ifndef S5_LINE_MAX_45_MM               /* line crossed at 45 degrees:  */
 #define S5_LINE_MAX_45_MM       (80)    /* tape + sensor gap, see .h    */
 #endif
@@ -81,29 +81,59 @@ static ID h_flg_events = (ID)0;
 static volatile uint8_t mission = 0u;
 
 static uint8_t  cmd_seq         = 0u;
-static bool     b_cal_ok        = false;
 static uint8_t  start_history   = 0xFFu;   /* 1 = released (active low) */
 static uint8_t  stop_history    = 0xFFu;
 
+/*
+ * Controller state (CR1 item 5): every small-range field in the bits it
+ * needs.  Private to controller_task (single writer, single reader), so
+ * the bit-field read-modify-writes need no lock.  Unsigned fields only
+ * (BARR-C 5.3.a); the bit order is irrelevant as it never leaves the task.
+ */
+typedef struct
+{
+    uint32_t leg            : 4;   /* bypass leg 0..12, VC_LEG_NONE = 15 */
+    uint32_t retries        : 3;   /* scan back-offs, <= S5_MAX_RETRIES  */
+    uint32_t stripe_step    : 2;   /* leg 5 line finder, 0..3            */
+    uint32_t side_step      : 2;   /* leg 3 side look, 0..3              */
+    uint32_t far_pings      : 3;   /* side look misses in a row          */
+    uint32_t check_pings    : 3;   /* readings for a clearance check     */
+    uint32_t path_tries     : 4;   /* path-check steps, <= S5_PATH_TRIES */
+    uint32_t search_step    : 5;   /* line search sweep number           */
+    uint32_t junction_step  : 2;   /* 0 idle, 1 to the axle, 2 turning   */
+    uint32_t pending_turn   : 3;   /* msg_barcode_cmd_t for next junction*/
+    uint32_t b_search_right : 1;
+    uint32_t b_was_lost     : 1;
+    uint32_t b_cal_ok       : 1;
+    uint32_t turn_deg       : 7;   /* 45 or 90                           */
+} vc_state_t;
+
+MSG_STATIC_ASSERT(sizeof(vc_state_t) <= 8u, vc_state_fits_two_words);
+MSG_STATIC_ASSERT(VC_LEG_STEP < VC_LEG_NONE, vc_leg_fits);
+MSG_STATIC_ASSERT(S5_MAX_RETRIES <= 7u, vc_retries_fit);
+MSG_STATIC_ASSERT(S5_PATH_TRIES <= 15u, vc_path_tries_fit);
+MSG_STATIC_ASSERT(S5_SIDE_LOST_PINGS <= 7u, vc_far_pings_fit);
+MSG_STATIC_ASSERT(S5_BYPASS_TURN_DEG <= 127u, vc_turn_fits);
+
+static vc_state_t ctl = { VC_LEG_NONE, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
+                         (uint32_t)MSG_BC_NONE, 0u, 0u, 0u,
+                         S5_BYPASS_TURN_DEG };
+
+/* Counter step that saturates instead of wrapping its bit-field. */
+static uint32_t vc_inc(uint32_t value, uint32_t max)
+{
+    return ((value < max) ? (value + 1u) : max);
+}
+
 static msg_obstacle_t obstacle;
-static uint8_t  bypass_leg      = VC_LEG_NONE;
-static uint8_t  avoid_retries   = 0u;
 static uint16_t lateral_mm      = 0u;
-static uint8_t  stripe_step     = 0u;   /* leg 5: 0 wait white, 1 white, */
-                                        /* 2 on black, 3 white after it  */
 static int32_t  stripe_start_mm = 0;
 static int32_t  stripe_mid_mm   = 0;
 static uint16_t creep_mm        = 0u;
-static uint8_t  side_step       = 0u;   /* leg 3: 0 not seen, 1 seeing, */
-                                        /* 2 passed and reported         */
 static uint32_t side_seen_count = 0u;   /* last side ping handled        */
 static int32_t  side_start_mm   = 0;
 static uint8_t  side_last_cm    = 0u;   /* last reading on the obstacle  */
-static uint8_t  side_far_pings  = 0u;
-static uint32_t turn_deg        = S5_BYPASS_TURN_DEG;  /* this bypass  */
-static uint8_t  check_pings     = 0u;
 static uint8_t  check_min_cm    = 0u;
-static uint8_t  path_tries      = 0u;
 static int32_t  pass_start_mm   = 0;    /* leg 3 start (left wheel)      */
 static uint32_t pass_min_mm     = 0u;   /* past the near face, no more   */
 static uint32_t pass_ahead_mm   = 0u;   /* forward already made, leg 1   */
@@ -112,16 +142,11 @@ static int32_t  pass_driven_mm  = 0;    /* leg 3 travel, side look blind */
 static uint32_t search_start_ms = 0u;
 static uint32_t follow_since_ms = 0u;
 static uint32_t lost_since_ms   = 0u;
-static bool     b_was_lost      = false;
-static uint8_t  search_step     = 0u;
 /* Manual move from Telemetry (core 1) to the Controller (core 0), CR1
    item 6: ONE word, bits 0-7 = command type, bits 8-23 = argument, so a
    second command can never pair its type with the first one's argument. */
 #define VC_MANUAL_ARG_SHIFT     (8u)
 static volatile uint32_t manual_word = 0u;    /* written by Telemetry */
-static bool     b_search_right  = false;   /* first turn toward the line */
-static uint8_t  pending_turn    = (uint8_t)MSG_BC_NONE; /* for next junction */
-static uint8_t  junction_step   = 0u;      /* 1 = to the axle, 2 = turning */
 static volatile uint8_t injected_turn = 0u;  /* written by Telemetry */
 
 /* ---------------------------------------------------------------------
@@ -173,13 +198,13 @@ static void send(msg_cmd_type_t type, uint32_t arg)
 
 static void enter_line_follow(void)
 {
-    bypass_leg    = VC_LEG_NONE;
-    junction_step = 0u;
+    ctl.leg    = VC_LEG_NONE;
+    ctl.junction_step = 0u;
     s5_obstacle_guard(false);
     s5_obstacle_request(S5_REQ_RESUME);
     set_mission(S5_PARENT_RUNNING, S5_SUB_LINE_FOLLOW);
     follow_since_ms = app_now_ms();
-    b_was_lost      = false;
+    ctl.b_was_lost      = false;
     s2_set_stop_on_line(false);
     send(MSG_CMD_LINE_PID, 0u);
 }
@@ -188,9 +213,9 @@ static void enter_running(void)
 {
     s3_set_active(true);
     s4_set_active(true);
-    avoid_retries = 0u;
-    pending_turn  = (uint8_t)MSG_BC_NONE;
-    junction_step = 0u;
+    ctl.retries = 0u;
+    ctl.pending_turn  = (uint8_t)MSG_BC_NONE;
+    ctl.junction_step = 0u;
     s3_force_straight(false);
     enter_line_follow();
     APP_LOG((UB*)"[S5] RUNNING\n");
@@ -207,7 +232,7 @@ static void enter_halted(s5_parent_t parent)
     s3_set_active(false);
     s4_set_active(false);
     s5_obstacle_guard(false);
-    bypass_leg = VC_LEG_NONE;
+    ctl.leg = VC_LEG_NONE;
     set_mission(parent, S5_SUB_LINE_FOLLOW);
 }
 
@@ -216,24 +241,24 @@ static void enter_search(void)
     msg_line_t line = {0};
     uint32_t   word = 0u;
 
-    bypass_leg = VC_LEG_NONE;
+    ctl.leg = VC_LEG_NONE;
     s5_obstacle_guard(false);
     s5_obstacle_request(S5_REQ_RESUME);     /* keep watching while searching */
     set_mission(S5_PARENT_RUNNING, S5_SUB_LINE_SEARCH);
     search_start_ms = app_now_ms();
-    search_step     = 1u;
+    ctl.search_step     = 1u;
 
     /* Turn FIRST toward where the line was last seen: while lost, the
        line word keeps the saturated error in the direction it left. */
-    b_search_right = false;
+    ctl.b_search_right = false;
     if (s3_read_line_word(&word))
     {
         msg_unpack_line(word, &line);
-        b_search_right = (line.error > 0);
+        ctl.b_search_right = (line.error > 0);
     }
 
     s2_set_stop_on_line(true);
-    send(b_search_right ? MSG_CMD_TURN_R : MSG_CMD_TURN_L,
+    send(ctl.b_search_right ? MSG_CMD_TURN_R : MSG_CMD_TURN_L,
          VC_SEARCH_STEP_DEG);
 }
 
@@ -246,7 +271,7 @@ static void send_turn(bool b_out)
 {
     bool b_left = (MSG_SIDE_LEFT == obstacle.side);
 
-    send((b_left == b_out) ? MSG_CMD_TURN_L : MSG_CMD_TURN_R, turn_deg);
+    send((b_left == b_out) ? MSG_CMD_TURN_L : MSG_CMD_TURN_R, ctl.turn_deg);
 }
 
 /* sin(deg) x 256 for the servo limit (10..60 degrees, every 5). */
@@ -265,7 +290,7 @@ static uint32_t sin_q8_deg(uint32_t deg)
    x 1/sin(45) = x 1.414 at 45 degrees, x 1 at 90. */
 static uint32_t diagonal_mm(uint32_t side_mm)
 {
-    return ((45u == turn_deg) ? ((side_mm * 1414u) / 1000u) : side_mm);
+    return ((45u == ctl.turn_deg) ? ((side_mm * 1414u) / 1000u) : side_mm);
 }
 
 static int32_t left_mm(void);
@@ -293,19 +318,19 @@ static void report_size(void)
 {
     int32_t length_cm = (left_mm() - side_start_mm) / 10;
 
-    if (1u == side_step)
+    if (1u == ctl.side_step)
     {
         APP_LOG((UB*)"[S5] obstacle size: width %d cm, length over %d cm "
                      "(still beside the car at the end of the leg)\n",
                 (INT)obstacle.width_cm, (INT)length_cm);
     }
-    else if (0u == side_step)
+    else if (0u == ctl.side_step)
     {
         APP_LOG((UB*)"[S5] obstacle size: width %d cm, length not "
                      "measured (side sensor never saw it)\n",
                 (INT)obstacle.width_cm);
     }
-    else if (3u == side_step)
+    else if (3u == ctl.side_step)
     {
         APP_LOG((UB*)"[S5] obstacle size: width %d cm, length not seen "
                      "by the side look (path check measures it)\n",
@@ -315,7 +340,7 @@ static void report_size(void)
     {
         /* Reported when the sensor lost it (watch_side). */
     }
-    side_step = 2u;
+    ctl.side_step = 2u;
 }
 
 /*
@@ -328,7 +353,7 @@ static void start_pass(void)
 
     /* Look at the obstacle while passing it: measures its length
        and ends this leg as soon as it is behind (watch_side). */
-    side_step = 0u;
+    ctl.side_step = 0u;
     (void)s5_get_side_cm(&side_seen_count);
     s5_obstacle_request((MSG_SIDE_RIGHT == obstacle.side)
                         ? S5_REQ_SIDE_L : S5_REQ_SIDE_R);
@@ -340,7 +365,7 @@ static void start_pass(void)
        distance_cm is from the SENSOR; the axle is
        S5_US_TO_AXLE_CM behind it.  A 45 degree leg 1 already
        moved the car forward as far as it moved sideways. */
-    ahead_mm = (45u == turn_deg) ? (uint32_t)lateral_mm : 0u;
+    ahead_mm = (45u == ctl.turn_deg) ? (uint32_t)lateral_mm : 0u;
     /* If the side look stays blind, do not turn back at the near face:
        the pivot swings the front corner into the obstacle (test 10, leg 4
        stalled against the block).  Go on by the MEASURED width first (an
@@ -360,7 +385,7 @@ static void start_pass(void)
 /* Issue bypass leg number 'leg'. */
 static void run_leg(uint8_t leg)
 {
-    bypass_leg = leg;
+    ctl.leg = leg;
     s5_obstacle_guard((1u == leg) || (3u == leg) || (5u == leg)
                       || (VC_LEG_STEP == leg));
 
@@ -370,14 +395,14 @@ static void run_leg(uint8_t leg)
     switch (leg)
     {
         case 0u:
-            turn_deg   = S5_BYPASS_TURN_DEG;
-            path_tries = 0u;
+            ctl.turn_deg   = S5_BYPASS_TURN_DEG;
+            ctl.path_tries = 0u;
             send_turn(true);
         break;
 
         case VC_LEG_PATHCHK:
             /* Facing the way to the line: anything in it? */
-            check_pings  = 0u;
+            ctl.check_pings  = 0u;
             check_min_cm = 0xFFu;
             (void)s5_get_side_cm(&side_seen_count);
             s5_obstacle_request(S5_REQ_MEASURE);
@@ -393,7 +418,7 @@ static void run_leg(uint8_t leg)
 
         case VC_LEG_CHECK:
             /* Stopped at 45 degrees: look back towards the obstacle. */
-            check_pings  = 0u;
+            ctl.check_pings  = 0u;
             check_min_cm = 0xFFu;
             (void)s5_get_side_cm(&side_seen_count);
             s5_obstacle_request((MSG_SIDE_RIGHT == obstacle.side)
@@ -403,7 +428,7 @@ static void run_leg(uint8_t leg)
         case VC_LEG_SQUARE:
             /* The other 45 degrees: the rest of the bypass is square. */
             send_turn(true);
-            turn_deg = 90u;
+            ctl.turn_deg = 90u;
         break;
 
         case 1u:
@@ -415,7 +440,7 @@ static void run_leg(uint8_t leg)
         break;
 
         case 5u:
-            stripe_step = 0u;
+            ctl.stripe_step = 0u;
             send(MSG_CMD_FORWARD, diagonal_mm(lateral_mm) + 150u);
         break;
 
@@ -433,7 +458,7 @@ static void run_leg(uint8_t leg)
             {
                 report_size();
                 s5_obstacle_request(S5_REQ_AHEAD);
-                turn_deg = 90u; 
+                ctl.turn_deg = 90u;     /* return square: shortest run-in */
             }
             send_turn(false);
         break;
@@ -443,10 +468,10 @@ static void run_leg(uint8_t leg)
 /* Reverse S5_REVERSE_MM and profile again when that is done. */
 static void back_off(const char *p_why)
 {
-    avoid_retries = (uint8_t)(avoid_retries + 1u);
-    bypass_leg    = VC_LEG_NONE;
+    ctl.retries = vc_inc(ctl.retries, 7u);
+    ctl.leg    = VC_LEG_NONE;
     APP_LOG((UB*)"[S5] %s: back off %d mm and rescan (%d)\n", p_why,
-            (INT)S5_REVERSE_MM, (INT)avoid_retries);
+            (INT)S5_REVERSE_MM, (INT)ctl.retries);
     send(MSG_CMD_REVERSE, S5_REVERSE_MM);
 }
 
@@ -476,7 +501,7 @@ static void handle_profile(void)
         /* False alarm: nothing confirmed by the fine scan. */
         enter_line_follow();
     }
-    else if (s5_last_scan_clipped() && (avoid_retries < S5_MAX_RETRIES))
+    else if (s5_last_scan_clipped() && (ctl.retries < S5_MAX_RETRIES))
     {
         /* The obstacle filled the scan out to an end of the arc: its edge
            was not seen, so neither its width nor the side clearance can
@@ -509,7 +534,7 @@ static void handle_profile(void)
                                  (uint16_t)MSG_MAX_CMD_ARG, NULL);
         run_leg(0u);
     }
-    else if (avoid_retries < S5_MAX_RETRIES)
+    else if (ctl.retries < S5_MAX_RETRIES)
     {
         /* Neither side fits: back off and look again (REVERSE_RETRY). */
         back_off("no side fits");
@@ -519,7 +544,7 @@ static void handle_profile(void)
         /* ABORT: retries exhausted.  Stop and report through the Fault
            Table so the operator sees why. */
         APP_LOG((UB*)"[S5] bypass aborted after %d retries\n",
-                  (INT)avoid_retries);
+                  (INT)ctl.retries);
         fault_set(FAULT_OBSTACLE_STOP);
     }
 }
@@ -527,47 +552,47 @@ static void handle_profile(void)
 /* A bypass leg finished: start the next one. */
 static void bypass_move_done(void)
 {
-    if (VC_LEG_NONE == bypass_leg)
+    if (VC_LEG_NONE == ctl.leg)
     {
         /* The reverse of a retry finished: profile again. */
         s5_obstacle_request(S5_REQ_SCAN);
     }
-    else if (VC_LEG_ALIGN == bypass_leg)
+    else if (VC_LEG_ALIGN == ctl.leg)
     {
         enter_line_follow();            /* line reacquired (FR8) */
     }
-    else if (VC_LEG_CREEP == bypass_leg)
+    else if (VC_LEG_CREEP == ctl.leg)
     {
         run_leg(VC_LEG_ALIGN);          /* axle over the line: turn */
     }
-    else if ((0u == bypass_leg) && (45u == turn_deg))
+    else if ((0u == ctl.leg) && (45u == ctl.turn_deg))
     {
         run_leg(VC_LEG_CHECK);          /* is the diagonal clear? */
     }
-    else if (VC_LEG_SQUARE == bypass_leg)
+    else if (VC_LEG_SQUARE == ctl.leg)
     {
         run_leg(1u);
     }
-    else if (4u == bypass_leg)
+    else if (4u == ctl.leg)
     {
         run_leg(VC_LEG_PATHCHK);        /* is the way to the line clear? */
     }
-    else if (VC_LEG_UNTURN == bypass_leg)
+    else if (VC_LEG_UNTURN == ctl.leg)
     {
         run_leg(VC_LEG_STEP);
     }
-    else if (VC_LEG_STEP == bypass_leg)
+    else if (VC_LEG_STEP == ctl.leg)
     {
         run_leg(4u);                    /* turn back and look again */
     }
-    else if ((VC_LEG_CHECK == bypass_leg)
-             || (VC_LEG_PATHCHK == bypass_leg))
+    else if ((VC_LEG_CHECK == ctl.leg)
+             || (VC_LEG_PATHCHK == ctl.leg))
     {
         /* Waiting for readings (poll_running). */
     }
-    else if (bypass_leg < 5u)
+    else if (ctl.leg < 5u)
     {
-        run_leg((uint8_t)(bypass_leg + 1u));
+        run_leg((uint8_t)(ctl.leg + 1u));
     }
     else
     {
@@ -582,15 +607,15 @@ static void handle_move_done(void)
 {
     s5_sub_t sub = get_sub();
 
-    if ((S5_SUB_BARCODE_ACTION == sub) && (1u == junction_step))
+    if ((S5_SUB_BARCODE_ACTION == sub) && (1u == ctl.junction_step))
     {
         /* At the junction centre: now turn. */
-        junction_step = 2u;
-        if (MSG_BC_LEFT == pending_turn)
+        ctl.junction_step = 2u;
+        if (MSG_BC_LEFT == ctl.pending_turn)
         {
             send(MSG_CMD_TURN_L, S5_JUNCTION_TURN_DEG);
         }
-        else if (MSG_BC_RIGHT == pending_turn)
+        else if (MSG_BC_RIGHT == ctl.pending_turn)
         {
             send(MSG_CMD_TURN_R, S5_JUNCTION_TURN_DEG);
         }
@@ -598,11 +623,11 @@ static void handle_move_done(void)
         {
             send(MSG_CMD_U_TURN, 180u);
         }
-        pending_turn = (uint8_t)MSG_BC_NONE;
+        ctl.pending_turn = (uint8_t)MSG_BC_NONE;
     }
     else if (S5_SUB_BARCODE_ACTION == sub)
     {
-        junction_step = 0u;
+        ctl.junction_step = 0u;
         enter_line_follow();
     }
     else if (S5_SUB_OBSTACLE_AVOID == sub)
@@ -618,10 +643,10 @@ static void handle_move_done(void)
     else if (S5_SUB_LINE_SEARCH == sub)
     {
         /* Widening sweep: alternate sides, one step wider each time. */
-        search_step = (uint8_t)(search_step + 1u);
-        send((((search_step % 2u) == 1u) == b_search_right)
+        ctl.search_step = vc_inc(ctl.search_step, 31u);
+        send(((1u == (ctl.search_step % 2u)) == (0u != ctl.b_search_right))
                  ? MSG_CMD_TURN_R : MSG_CMD_TURN_L,
-             (uint32_t)search_step * VC_SEARCH_STEP_DEG);
+             (uint32_t)ctl.search_step * VC_SEARCH_STEP_DEG);
     }
     else
     {
@@ -659,10 +684,10 @@ static const char *turn_name(uint8_t cmd)
    corner. */
 static void store_turn(uint8_t cmd, const char *p_from)
 {
-    pending_turn = cmd;
+    ctl.pending_turn = cmd;
     s3_force_straight(MSG_BC_STRAIGHT == cmd);
     APP_LOG((UB*)"[S5] %s %s: will be done at the next junction\n",
-            p_from, turn_name(pending_turn));
+            p_from, turn_name(ctl.pending_turn));
 }
 
 /*
@@ -671,21 +696,21 @@ static void store_turn(uint8_t cmd, const char *p_from)
  */
 static void handle_barcode(void)
 {
-    msg_barcode_t bc;
+    msg_barcode_t bc_msg;
     bool          b_got;
 
-    b_got = s3_take_barcode(&bc);
+    b_got = s3_take_barcode(&bc_msg);
     if (b_got)
     {
-        APP_LOG((UB*)"[S5] barcode cmd %d conf %d%s\n", (INT)bc.cmd,
-                  (INT)bc.confidence,
-                  (bc.confidence >= VC_MIN_CONFIDENCE) ? "" : " (ignored)");
+        APP_LOG((UB*)"[S5] barcode cmd %d conf %d%s\n", (INT)bc_msg.cmd,
+                  (INT)bc_msg.confidence,
+                  (bc_msg.confidence >= VC_MIN_CONFIDENCE) ? "" : " (ignored)");
     }
 
-    if (b_got && (bc.confidence >= VC_MIN_CONFIDENCE)
-        && (MSG_BC_INVALID != bc.cmd) && (MSG_BC_NONE != bc.cmd))
+    if (b_got && (bc_msg.confidence >= VC_MIN_CONFIDENCE)
+        && (MSG_BC_INVALID != bc_msg.cmd) && (MSG_BC_NONE != bc_msg.cmd))
     {
-        store_turn((uint8_t)bc.cmd, "barcode");
+        store_turn((uint8_t)bc_msg.cmd, "barcode");
     }
 }
 
@@ -704,21 +729,22 @@ static void handle_junction(void)
     {
         /* Mid-manoeuvre (a junction turn crosses the lines): ignore. */
     }
-    else if ((MSG_BC_LEFT == pending_turn) || (MSG_BC_RIGHT == pending_turn)
-             || (MSG_BC_U_TURN == pending_turn))
+    else if ((MSG_BC_LEFT == ctl.pending_turn)
+             || (MSG_BC_RIGHT == ctl.pending_turn)
+             || (MSG_BC_U_TURN == ctl.pending_turn))
     {
         APP_LOG((UB*)"[S5] junction %d: %s\n",
-                (INT)s3_get_junction_count(), turn_name(pending_turn));
+                (INT)s3_get_junction_count(), turn_name(ctl.pending_turn));
         set_mission(S5_PARENT_RUNNING, S5_SUB_BARCODE_ACTION);
-        junction_step = 1u;
+        ctl.junction_step = 1u;
         send(MSG_CMD_FORWARD, S5_SENSOR_TO_AXLE_MM);
     }
     else
     {
         /* STRAIGHT or nothing stored: keep following the line. */
         APP_LOG((UB*)"[S5] junction %d: %s\n",
-                (INT)s3_get_junction_count(), turn_name(pending_turn));
-        pending_turn = (uint8_t)MSG_BC_NONE;
+                (INT)s3_get_junction_count(), turn_name(ctl.pending_turn));
+        ctl.pending_turn = (uint8_t)MSG_BC_NONE;
     }
 }
 
@@ -745,14 +771,14 @@ static void watch_for_line(void)
     bool    b_black = s3_line_seen();
     int32_t now_mm  = left_mm();
     int32_t ahead_mm;
-    int32_t max_mm  = (45u == turn_deg) ? S5_LINE_MAX_45_MM
+    int32_t max_mm  = (45u == ctl.turn_deg) ? S5_LINE_MAX_45_MM
                                         : S5_LINE_MAX_MM;
 
-    if (0u == stripe_step)
+    if (0u == ctl.stripe_step)
     {
-        stripe_step = b_black ? 0u : 1u;          /* need white first   */
+        ctl.stripe_step = b_black ? 0u : 1u;          /* need white first   */
     }
-    else if (1u == stripe_step)
+    else if (1u == ctl.stripe_step)
     {
         /* On white, waiting for black.  (Was: only "1 and black" here, so
            white on step 1 fell to the final else and reset to 0 -- the
@@ -762,18 +788,18 @@ static void watch_for_line(void)
         if (b_black)
         {
             stripe_start_mm = now_mm;
-            stripe_step     = 2u;
+            ctl.stripe_step     = 2u;
         }
     }
-    else if (2u == stripe_step)
+    else if (2u == ctl.stripe_step)
     {
         if (!b_black)
         {
             ahead_mm = now_mm - stripe_start_mm;  /* stripe width       */
             stripe_mid_mm = stripe_start_mm + (ahead_mm / 2);
-            stripe_step   = ((ahead_mm >= S5_LINE_MIN_MM)
+            ctl.stripe_step   = ((ahead_mm >= S5_LINE_MIN_MM)
                              && (ahead_mm <= max_mm)) ? 3u : 1u;
-            if (1u == stripe_step)
+            if (1u == ctl.stripe_step)
             {
                 APP_LOG((UB*)"[S5] stripe %d mm: too narrow, not the line\n",
                         (INT)ahead_mm);
@@ -783,21 +809,21 @@ static void watch_for_line(void)
         {
             APP_LOG((UB*)"[S5] stripe over %d mm: too wide, not the line\n",
                     (INT)max_mm);
-            stripe_step = 0u;                     /* too wide: not it   */
+            ctl.stripe_step = 0u;                     /* too wide: not it   */
         }
         else
         {
             /* Still on the stripe. */
         }
     }
-    else if (3u == stripe_step)
+    else if (3u == ctl.stripe_step)
     {
         if (b_black)
         {
             APP_LOG((UB*)"[S5] stripe followed by another within %d mm: "
                          "a barcode, not the line\n",
                     (INT)(now_mm - stripe_mid_mm));
-            stripe_step = 2u;                     /* another bar: not   */
+            ctl.stripe_step = 2u;                     /* another bar: not   */
             stripe_start_mm = now_mm;             /* the line; restart  */
         }
         else if ((now_mm - stripe_mid_mm) >= (S5_LINE_WHITE_MM
@@ -810,7 +836,7 @@ static void watch_for_line(void)
             APP_LOG((UB*)"[S5] line found (%d mm stripe): creep %d mm\n",
                     (INT)((stripe_mid_mm - stripe_start_mm) * 2),
                     (INT)creep_mm);
-            stripe_step = 0u;
+            ctl.stripe_step = 0u;
             run_leg(VC_LEG_CREEP);
         }
         else
@@ -820,7 +846,7 @@ static void watch_for_line(void)
     }
     else
     {
-        stripe_step = 0u;
+        ctl.stripe_step = 0u;
     }
 }
 
@@ -834,43 +860,43 @@ static void watch_for_line(void)
 static void watch_side(void)
 {
     uint32_t count;
-    uint8_t  cm = s5_get_side_cm(&count);
+    uint8_t  side_cm = s5_get_side_cm(&count);
     bool     b_near;
     int32_t  length_cm;
     uint32_t rest_mm;
 
-    if ((0u == side_step)
+    if ((0u == ctl.side_step)
         && ((left_mm() - pass_start_mm) >= (int32_t)pass_min_mm))
     {
         /* Past the near face and the side look has seen nothing: do not
            guess the length, turn back and let the path check look. */
         APP_LOG((UB*)"[S5] side look saw nothing: turning back, the path "
                      "check finds the far end\n");
-        side_step      = 3u;
+        ctl.side_step      = 3u;
         pass_driven_mm = left_mm() - pass_start_mm;
         run_leg(4u);                    /* replaces leg 3 */
     }
     else if (count != side_seen_count)
     {
         side_seen_count = count;
-        b_near = (0u != cm) && (cm <= S5_SIDE_NEAR_CM);
+        b_near = (0u != side_cm) && (side_cm <= S5_SIDE_NEAR_CM);
 
-        if ((0u == side_step) && b_near)
+        if ((0u == ctl.side_step) && b_near)
         {
             side_start_mm  = left_mm();
-            side_last_cm   = cm;
-            side_far_pings = 0u;
-            side_step      = 1u;
+            side_last_cm   = side_cm;
+            ctl.far_pings = 0u;
+            ctl.side_step      = 1u;
         }
-        else if ((1u == side_step) && b_near)
+        else if ((1u == ctl.side_step) && b_near)
         {
-            side_last_cm   = cm;
-            side_far_pings = 0u;
+            side_last_cm   = side_cm;
+            ctl.far_pings = 0u;
         }
-        else if (1u == side_step)
+        else if (1u == ctl.side_step)
         {
-            side_far_pings = (uint8_t)(side_far_pings + 1u);
-            if (side_far_pings >= S5_SIDE_LOST_PINGS)
+            ctl.far_pings = vc_inc(ctl.far_pings, 7u);
+            if (ctl.far_pings >= S5_SIDE_LOST_PINGS)
             {
                 length_cm = (left_mm() - side_start_mm) / 10;
                 rest_mm   = ((((uint32_t)side_last_cm * 866u) / 1000u)
@@ -880,7 +906,7 @@ static void watch_side(void)
                              " -> %d mm more, then turn back\n",
                         (INT)obstacle.width_cm, (INT)length_cm,
                         (INT)rest_mm);
-                side_step = 2u;
+                ctl.side_step = 2u;
                 send(MSG_CMD_FORWARD, rest_mm);     /* replaces leg 3 */
             }
         }
@@ -907,21 +933,21 @@ static void watch_side(void)
 static void check_diagonal(void)
 {
     uint32_t count;
-    uint8_t  cm = s5_get_side_cm(&count);
+    uint8_t  side_cm = s5_get_side_cm(&count);
     uint32_t need_cm;
     uint32_t clear_cm;
 
     if (count != side_seen_count)
     {
         side_seen_count = count;
-        check_pings     = (uint8_t)(check_pings + 1u);
-        if ((0u != cm) && (cm < check_min_cm))
+        ctl.check_pings     = vc_inc(ctl.check_pings, 7u);
+        if ((0u != side_cm) && (side_cm < check_min_cm))
         {
-            check_min_cm = cm;
+            check_min_cm = side_cm;
         }
     }
 
-    if (check_pings >= VC_CHECK_PINGS)
+    if (ctl.check_pings >= VC_CHECK_PINGS)
     {
         need_cm  = (S5_ROBOT_WIDTH_CM / 2u) + S5_CLEARANCE_MARGIN_CM
                  + ((MSG_SIDE_RIGHT == obstacle.side)
@@ -963,10 +989,10 @@ static void report_path_length(void)
 {
     int32_t far_mm;
 
-    if (3u == side_step)
+    if (3u == ctl.side_step)
     {
         far_mm = (int32_t)pass_ahead_mm + pass_driven_mm
-                 + ((int32_t)path_tries * (int32_t)S5_PATH_STEP_CM * 10)
+                 + ((int32_t)ctl.path_tries * (int32_t)S5_PATH_STEP_CM * 10)
                  - (((int32_t)obstacle.distance_cm
                      + (int32_t)S5_US_TO_AXLE_CM) * 10);
         APP_LOG((UB*)"[S5] obstacle size: width %d cm, length at most "
@@ -983,26 +1009,26 @@ static void report_path_length(void)
 static void check_path(void)
 {
     uint32_t count;
-    uint8_t  cm = s5_get_side_cm(&count);
+    uint8_t  side_cm = s5_get_side_cm(&count);
     uint32_t way_cm = (diagonal_mm(lateral_mm) / 10u) + 10u;
 
     if (count != side_seen_count)
     {
         side_seen_count = count;
-        check_pings     = (uint8_t)(check_pings + 1u);
-        if ((0u != cm) && (cm < check_min_cm))
+        ctl.check_pings     = vc_inc(ctl.check_pings, 7u);
+        if ((0u != side_cm) && (side_cm < check_min_cm))
         {
-            check_min_cm = cm;
+            check_min_cm = side_cm;
         }
     }
 
-    if (check_pings >= VC_CHECK_PINGS)
+    if (ctl.check_pings >= VC_CHECK_PINGS)
     {
         s5_obstacle_request(S5_REQ_AHEAD);
         if (((uint32_t)check_min_cm < way_cm)
-            && (path_tries < S5_PATH_TRIES))
+            && (ctl.path_tries < S5_PATH_TRIES))
         {
-            path_tries = (uint8_t)(path_tries + 1u);
+            ctl.path_tries = vc_inc(ctl.path_tries, 15u);
             APP_LOG((UB*)"[S5] obstacle still in the way (%d cm, way to "
                          "the line %d cm): %d cm further on\n",
                     (INT)check_min_cm, (INT)way_cm, (INT)S5_PATH_STEP_CM);
@@ -1013,7 +1039,7 @@ static void check_path(void)
             /* Still not past after every step: never drive into it. */
             APP_LOG((UB*)"[S5] obstacle still in the way after %d steps "
                          "(longer than the bypass allows): stopping\n",
-                    (INT)path_tries);
+                    (INT)ctl.path_tries);
             fault_set(FAULT_OBSTACLE_STOP);
         }
         else
@@ -1036,11 +1062,11 @@ static void poll_running(void)
     s5_sub_t sub       = get_sub();
 
     /* How long the line has been continuously lost. */
-    if (b_lost && !b_was_lost)
+    if (b_lost && !ctl.b_was_lost)
     {
         lost_since_ms = app_now_ms();
     }
-    b_was_lost = b_lost;
+    ctl.b_was_lost = b_lost;
 
     if ((S5_SUB_LINE_FOLLOW == sub) && b_lost
         && ((app_now_ms() - follow_since_ms) > VC_LOST_GRACE_MS)
@@ -1048,21 +1074,21 @@ static void poll_running(void)
     {
         enter_search();
     }
-    else if ((S5_SUB_OBSTACLE_AVOID == sub) && (5u == bypass_leg))
+    else if ((S5_SUB_OBSTACLE_AVOID == sub) && (5u == ctl.leg))
     {
         watch_for_line();
     }
-    else if ((S5_SUB_OBSTACLE_AVOID == sub) && (3u == bypass_leg))
+    else if ((S5_SUB_OBSTACLE_AVOID == sub) && (3u == ctl.leg))
     {
         watch_side();
     }
     else if ((S5_SUB_OBSTACLE_AVOID == sub)
-             && (VC_LEG_CHECK == bypass_leg))
+             && (VC_LEG_CHECK == ctl.leg))
     {
         check_diagonal();
     }
     else if ((S5_SUB_OBSTACLE_AVOID == sub)
-             && (VC_LEG_PATHCHK == bypass_leg))
+             && (VC_LEG_PATHCHK == ctl.leg))
     {
         check_path();
     }
@@ -1138,13 +1164,13 @@ static void do_reset(void)
     fault_clear((uint16_t)(FAULT_MASK_ALL & ~(uint32_t)FAULT_WIFI_LOSS));
     s4_request_reset();
 
-    if (!b_cal_ok)
+    if (!ctl.b_cal_ok)
     {
-        b_cal_ok = (E_OK == s3_calibrate());
+        ctl.b_cal_ok = (E_OK == s3_calibrate());
     }
 
-    enter_halted(b_cal_ok ? S5_PARENT_READY : S5_PARENT_FAULT);
-    APP_LOG((UB*)"[S5] RESET -> %s\n", b_cal_ok ? "READY" : "FAULT");
+    enter_halted(ctl.b_cal_ok ? S5_PARENT_READY : S5_PARENT_FAULT);
+    APP_LOG((UB*)"[S5] RESET -> %s\n", ctl.b_cal_ok ? "READY" : "FAULT");
 }
 
 static void do_start(void)
@@ -1226,7 +1252,7 @@ static void handle_events(uint32_t events)
             /* Reachable from LINE_FOLLOW, BARCODE_ACTION and LINE_SEARCH:
                stop, so the profile is taken from a fixed position. */
             set_mission(S5_PARENT_RUNNING, S5_SUB_OBSTACLE_AVOID);
-            bypass_leg = VC_LEG_NONE;
+            ctl.leg = VC_LEG_NONE;
             send(MSG_CMD_STOP, 0u);
             s5_obstacle_request(S5_REQ_SCAN);
         }
@@ -1296,8 +1322,8 @@ EXPORT void controller_task(INT stacd, void *p_exinf)
     (void)p_exinf;
 
     /* ---- INIT: self-test, then READY or FAULT ---- */
-    b_cal_ok = (E_OK == s3_calibrate());
-    if (b_cal_ok)
+    ctl.b_cal_ok = (E_OK == s3_calibrate());
+    if (ctl.b_cal_ok)
     {
         enter_halted(S5_PARENT_READY);
         APP_LOG((UB*)"[S5] READY -- press START or publish a command\n");
@@ -1312,7 +1338,7 @@ EXPORT void controller_task(INT stacd, void *p_exinf)
        come in the first half second, usually before the serial monitor
        has reconnected, so they are easy to miss. */
     APP_LOG((UB*)"[S5] boot summary: line calibration %s, IMU %s\n",
-            b_cal_ok ? "OK" : "FAILED (line not between the sensors?)",
+            ctl.b_cal_ok ? "OK" : "FAILED (line not between the sensors?)",
             (S4_IMU_FAULT == s4_get_state()) ? "FAULT (see [S4] lines)"
             : ((S4_INIT_CAL == s4_get_state()) ? "still calibrating"
                : "calibrated"));

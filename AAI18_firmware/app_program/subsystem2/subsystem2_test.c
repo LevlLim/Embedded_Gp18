@@ -83,7 +83,7 @@ EXPORT void subsystem2_test(void)
      * reporting M_ESTOP, which is the software contribution alone.
      */
     t_start = app_now_ms();
-    fault_set(FAULT_COLLISION);
+    fault_set(FAULT_LIFTED);
 
     while ((M_ESTOP != s2_get_state())
            && ((app_now_ms() - t_start) < 500u))

@@ -239,17 +239,17 @@ EXPORT void subsystem5_test(void)
     /*
      * T4: concurrency injection.  Four sources set four different bits
      * repeatedly; every bit must survive.  This is the test for risk R4 --
-     * a lost bit means a real collision is never reported.
+     * a lost bit means a real lift is never reported.
      */
     fault_clear(FAULT_MASK_ALL);
-    expected = (uint16_t)(FAULT_COLLISION | FAULT_MOTOR_STALL
+    expected = (uint16_t)(FAULT_LIFTED | FAULT_MOTOR_STALL
                         | FAULT_NO_ECHO | FAULT_WIFI_LOSS);
 
     for (idx = 0u; idx < 100u; idx++)
     {
         fault_clear(FAULT_MASK_ALL);
 
-        fault_set(FAULT_COLLISION);
+        fault_set(FAULT_LIFTED);
         fault_set(FAULT_MOTOR_STALL);
         fault_set(FAULT_NO_ECHO);
         fault_set(FAULT_WIFI_LOSS);
@@ -285,15 +285,15 @@ EXPORT void subsystem5_test(void)
         tm_printf((UB*)"[TEST-S5] PASS: WIFI_LOSS does not stop the car\n");
     }
 
-    fault_set(FAULT_COLLISION);
+    fault_set(FAULT_LIFTED);
 
     if (fault_is_estop())
     {
-        tm_printf((UB*)"[TEST-S5] PASS: COLLISION reads as E-STOP\n");
+        tm_printf((UB*)"[TEST-S5] PASS: LIFTED reads as E-STOP\n");
     }
     else
     {
-        tm_printf((UB*)"[TEST-S5] FAIL: COLLISION missing from E-STOP mask\n");
+        tm_printf((UB*)"[TEST-S5] FAIL: LIFTED missing from E-STOP mask\n");
     }
 
     fault_clear(FAULT_MASK_ALL);
