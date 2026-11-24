@@ -88,18 +88,36 @@
 
 /* SIDE RAMP: only the left or the right wheels go up, so the car ROLLS.
    With one side on the floor, the raised side's height is
-       wheel spacing x sin(roll)
-   No distance is needed.  A side ramp starts at S4_SIDE_START_DEG of
-   roll (for S4_DEBOUNCE_SAMPLES readings) and ends when the roll is back
-   under S4_SIDE_LEVEL_DEG; the PEAK roll gives the height.  If the car is
-   still raised after S4_SIDE_REPORT_MS it is reported then too (a ramp
-   that ends raised).  S4_WHEEL_SPACING_MM is the PHYSICAL distance
-   between the tyre centres -- measure it with a ruler (not
-   S2_TRACK_WIDTH_MM, which is tuned for turning).  PROVISIONAL. */
+       wheel spacing x sin(roll)  =  wheel spacing x side accel / 1 g
+   Worked from the side acceleration in mg, not the roll in whole
+   degrees: a 5 mm ramp is only asin(5 / 130) = 2.2 deg (38 mg), and
+   whole degrees are 2.3 mm steps.
+   - Measured from the car's own LEVEL value just before the ramp (a
+     slow average while level), so a mounting or calibration offset or a
+     sloping floor does not count as height.
+   - The STEADY value (~100 ms average) starts, measures and ends a
+     ramp, not single readings: a knock while placing the car read
+     12 deg on a 5 mm ramp (26 mm), and driving shakes the raw value.
+   - A ramp starts once the steady height reaches S4_SIDE_START_MM_X10
+     for S4_SIDE_DEBOUNCE readings, ends when it is back under
+     S4_SIDE_LEVEL_MM_X10, and is reported (peak steady height, counted
+     from S4_SIDE_SETTLE_MS after the start) only if it reached
+     S4_SIDE_MIN_MM.  Still raised after S4_SIDE_REPORT_MS:
+     reported then too (a ramp that ends raised).
+   S4_WHEEL_SPACING_MM is the PHYSICAL distance between the tyre centres
+   -- measure it with a ruler (not S2_TRACK_WIDTH_MM, which is tuned for
+   turning).  S4_SIDE_GAIN_PCT matches the formula to the real car: put a
+   known spacer under one side, parked, and set it to
+   100 x real mm / reported mm.  PROVISIONAL. */
 #define S4_WHEEL_SPACING_MM     (130)
-#define S4_SIDE_START_DEG       (5)
-#define S4_SIDE_LEVEL_DEG       (2)
+#define S4_SIDE_START_MM_X10    (30)    /* 3.0 mm: a ramp starts         */
+#define S4_SIDE_LEVEL_MM_X10    (15)    /* 1.5 mm: level again           */
+#define S4_SIDE_MIN_MM          (3u)    /* smaller peak: not reported    */
+#define S4_SIDE_GAIN_PCT        (100)   /* from a spacer test            */
+#define S4_SIDE_HOLD_DIV        (8)     /* steady: ~80 ms average        */
+#define S4_SIDE_BASE_DIV        (32)    /* level: ~320 ms average        */
 #define S4_SIDE_DEBOUNCE        (8u)    /* readings in a row (80 ms)     */
+#define S4_SIDE_SETTLE_MS       (150u)  /* peak only after this on ramp  */
 #define S4_SIDE_REPORT_MS       (1500u)
 #define S4_HUMP_TIMEOUT_MS      (4000u) /* a hump that never ends        */
 #define S4_IMU_FAIL_LIMIT       (3u)    /* consecutive I2C errors        */

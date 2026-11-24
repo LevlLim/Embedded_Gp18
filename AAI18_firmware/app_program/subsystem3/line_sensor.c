@@ -40,6 +40,12 @@
 #define S3_HOLD_MS          (200)
 #endif
 #define LS_HOLD_TICKS       (S3_HOLD_MS / LS_TICK_MS)
+/* Divisor for the fade: never 0, even with S3_HOLD_MS 0 (fade off). */
+#if ((S3_HOLD_MS / LS_TICK_MS) > 0)
+#define LS_HOLD_DIV         (S3_HOLD_MS / LS_TICK_MS)
+#else
+#define LS_HOLD_DIV         (1)
+#endif
 #ifndef S3_CURVE_STEP                   /* older subsystem3.h */
 #define S3_CURVE_STEP       (8)
 #define S3_CURVE_MAX        (32)
@@ -348,7 +354,7 @@ static int32_t both_white_error(bool *pb_any_line)
         {
             held = (touch_mag * ((int32_t)LS_HOLD_TICKS
                                  - (int32_t)white_ticks))
-                 / (int32_t)LS_HOLD_TICKS;
+                 / (int32_t)LS_HOLD_DIV;
         }
         error = (int32_t)last_side * ((held > seek) ? held : seek);
     }

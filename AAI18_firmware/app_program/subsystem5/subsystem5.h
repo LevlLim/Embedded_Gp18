@@ -198,7 +198,7 @@ MSG_STATIC_ASSERT((S5_SCAN_ARC_DEG >= 10) && (S5_SCAN_ARC_DEG <= 60),
    the bypass swings out too far).  Set it from a real obstacle: (printed
    width - real width) / 2.  0 = no correction. */
 #ifndef S5_BEAM_SPREAD_CM
-#define S5_BEAM_SPREAD_CM       (0)
+#define S5_BEAM_SPREAD_CM       (3)
 #endif
 
 #ifndef S5_BEAM_HALF_DEG

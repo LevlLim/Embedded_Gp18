@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <stdbool.h>
 
 #include "app.h"
@@ -31,28 +32,37 @@
 #include "subsystem4/subsystem4.h"
 #include "subsystem5/subsystem5.h"
 
-static int tests_run    = 0;
-static int tests_passed = 0;
+static int32_t tests_run    = 0;
+static int32_t tests_passed = 0;
 
 #define CHECK_TRUE(cond, label)                                         \
-    do {                                                                \
+    do                                                                  \
+    {                                                                   \
         tests_run++;                                                    \
-        if (cond) {                                                     \
+        if (cond)                                                       \
+        {                                                               \
             tests_passed++;                                             \
-        } else {                                                        \
-            printf("  FAIL: %s  (%s:%d)\n", (label), __FILE__, __LINE__); \
+        }                                                               \
+        else                                                            \
+        {                                                               \
+            printf("  FAIL: %s  (%s:%d)\n", (label), __FILE__,          \
+                   __LINE__);                                           \
         }                                                               \
     } while (0)
 
 #define CHECK_EQ_INT(got, want, label)                                  \
-    do {                                                                \
+    do                                                                  \
+    {                                                                   \
         tests_run++;                                                    \
-        if ((long)(got) == (long)(want)) {                              \
+        if ((int64_t)(want) == (int64_t)(got))                          \
+        {                                                               \
             tests_passed++;                                             \
-        } else {                                                        \
-            printf("  FAIL: %s  got %ld want %ld  (%s:%d)\n",           \
-                   (label), (long)(got), (long)(want),                  \
-                   __FILE__, __LINE__);                                 \
+        }                                                               \
+        else                                                            \
+        {                                                               \
+            printf("  FAIL: %s  got %" PRId64 " want %" PRId64          \
+                   "  (%s:%d)\n", (label), (int64_t)(got),              \
+                   (int64_t)(want), __FILE__, __LINE__);                \
         }                                                               \
     } while (0)
 
@@ -62,32 +72,32 @@ static int tests_passed = 0;
  * --------------------------------------------------------------------- */
 static void test_motion_cmd(void)
 {
-    msg_motion_cmd_t in;
+    msg_motion_cmd_t msg_in;
     msg_motion_cmd_t out;
     uint8_t          buf[MSG_LEN_MOTION_CMD];
-    int              failures = 0;
-    unsigned         type;
-    unsigned         arg;
-    unsigned         seq;
+    int32_t          failures = 0;
+    uint32_t         type;
+    uint32_t         arg;
+    uint32_t         seq;
 
     printf("motion command: exhaustive round trip\n");
 
-    for (type = 0u; type <= (unsigned)MSG_CMD_LAST; type++)
+    for (type = 0u; type <= (uint32_t)MSG_CMD_LAST; type++)
     {
         for (arg = 0u; arg <= MSG_MAX_CMD_ARG; arg++)
         {
             for (seq = 0u; seq <= 7u; seq++)
             {
-                in.type = (msg_cmd_type_t)type;
-                in.arg  = (uint16_t)arg;
-                in.seq  = (uint8_t)seq;
+                msg_in.type = (msg_cmd_type_t)type;
+                msg_in.arg  = (uint16_t)arg;
+                msg_in.seq  = (uint8_t)seq;
 
                 memset(buf, 0, sizeof(buf));
-                if ((MSG_LEN_MOTION_CMD != msg_pack_motion_cmd(&in, buf,
+                if ((MSG_LEN_MOTION_CMD != msg_pack_motion_cmd(&msg_in, buf,
                                                                sizeof(buf)))
                     || !msg_unpack_motion_cmd(buf, sizeof(buf), &out)
-                    || (out.type != in.type) || (out.arg != in.arg)
-                    || (out.seq != in.seq))
+                    || (out.type != msg_in.type) || (out.arg != msg_in.arg)
+                    || (out.seq != msg_in.seq))
                 {
                     failures++;
                 }
@@ -97,7 +107,7 @@ static void test_motion_cmd(void)
 
     CHECK_EQ_INT(failures, 0, "motion cmd exhaustive round trip");
     printf("  %u combinations checked, %d bytes per message\n",
-           ((unsigned)MSG_CMD_LAST + 1u) * (MSG_MAX_CMD_ARG + 1u) * 8u,
+           ((uint32_t)MSG_CMD_LAST + 1u) * (MSG_MAX_CMD_ARG + 1u) * 8u,
            MSG_LEN_MOTION_CMD);
 
     /* T2: an undefined code must never become a movement command. */
@@ -106,10 +116,10 @@ static void test_motion_cmd(void)
     CHECK_TRUE(!msg_unpack_motion_cmd(buf, sizeof(buf), &out),
                "undefined command type 7 rejected on unpack");
 
-    in.type = (msg_cmd_type_t)7;
-    in.arg  = 10u;
-    in.seq  = 0u;
-    CHECK_EQ_INT(msg_pack_motion_cmd(&in, buf, sizeof(buf)), 0,
+    msg_in.type = (msg_cmd_type_t)7;
+    msg_in.arg  = 10u;
+    msg_in.seq  = 0u;
+    CHECK_EQ_INT(msg_pack_motion_cmd(&msg_in, buf, sizeof(buf)), 0,
                  "undefined command type 7 refused on pack");
 }
 
@@ -118,17 +128,17 @@ static void test_motion_cmd(void)
  * --------------------------------------------------------------------- */
 static void test_saturation(void)
 {
-    msg_motion_cmd_t in;
+    msg_motion_cmd_t msg_in;
     msg_motion_cmd_t out;
     uint8_t          buf[MSG_LEN_MOTION_CMD];
     bool             b_sat;
 
     printf("saturation: out-of-range must clamp, never wrap\n");
 
-    in.type = MSG_CMD_FORWARD;
-    in.arg  = 2000u;
-    in.seq  = 1u;
-    (void)msg_pack_motion_cmd(&in, buf, sizeof(buf));
+    msg_in.type = MSG_CMD_FORWARD;
+    msg_in.arg  = 2000u;
+    msg_in.seq  = 1u;
+    (void)msg_pack_motion_cmd(&msg_in, buf, sizeof(buf));
     (void)msg_unpack_motion_cmd(buf, sizeof(buf), &out);
     CHECK_EQ_INT(out.arg, MSG_MAX_CMD_ARG, "arg 2000 clamps to 1023");
 
@@ -153,28 +163,28 @@ static void test_saturation(void)
  * --------------------------------------------------------------------- */
 static void test_telemetry_saturation(void)
 {
-    msg_telemetry_t in;
+    msg_telemetry_t msg_in;
     msg_telemetry_t out;
     uint8_t         buf[MSG_LEN_TELEMETRY];
 
     printf("telemetry: saturation on every field\n");
 
-    memset(&in, 0, sizeof(in));
-    in.tilt_deg   = 80;
-    in.speed_pct  = 200u;
-    in.line_error = 100;
-    in.hump_mm    = 200u;
+    memset(&msg_in, 0, sizeof(msg_in));
+    msg_in.tilt_deg   = 80;
+    msg_in.speed_pct  = 200u;
+    msg_in.line_error = 100;
+    msg_in.hump_mm    = 200u;
 
-    (void)msg_pack_telemetry(&in, buf, sizeof(buf));
+    (void)msg_pack_telemetry(&msg_in, buf, sizeof(buf));
     CHECK_TRUE(msg_unpack_telemetry(buf, sizeof(buf), &out), "unpack ok");
     CHECK_EQ_INT(out.tilt_deg, 63, "tilt 80 clamps to 63 (was -48)");
     CHECK_EQ_INT(out.speed_pct, 100, "speed 200 clamps to 100 (was 72)");
     CHECK_EQ_INT(out.line_error, 63, "line error 100 clamps to 63 (was -28)");
     CHECK_EQ_INT(out.hump_mm, 127, "hump 200 clamps to 127 (was 72)");
 
-    in.tilt_deg   = -90;
-    in.line_error = -100;
-    (void)msg_pack_telemetry(&in, buf, sizeof(buf));
+    msg_in.tilt_deg   = -90;
+    msg_in.line_error = -100;
+    (void)msg_pack_telemetry(&msg_in, buf, sizeof(buf));
     (void)msg_unpack_telemetry(buf, sizeof(buf), &out);
     CHECK_EQ_INT(out.tilt_deg, -63, "tilt -90 clamps to -63");
     CHECK_EQ_INT(out.line_error, -63, "line error -100 clamps to -63");
@@ -185,54 +195,54 @@ static void test_telemetry_saturation(void)
  * --------------------------------------------------------------------- */
 static void test_telemetry(void)
 {
-    msg_telemetry_t in;
+    msg_telemetry_t msg_in;
     msg_telemetry_t out;
     uint8_t         buf[MSG_LEN_TELEMETRY];
 
     printf("telemetry frame: round trip and guards\n");
 
-    memset(&in, 0, sizeof(in));
-    in.seq              = 42u;
-    in.veh_state        = msg_encode_veh_state(2u, 3u);
-    in.line_state       = (uint8_t)MSG_LINE_TRACK;
-    in.line_error       = -45;
-    in.b_line_valid     = true;
-    in.speed_pct        = 55u;
-    in.hump_mm          = 120u;
-    in.b_hump_sat       = true;
-    in.b_hump_invalid   = true;
-    in.tilt_deg         = -12;
-    in.obst_distance_cm = 200u;
-    in.fault_mask       = 0x0285u;
-    in.wifi_state       = 3u;
-    in.last_barcode     = (uint8_t)MSG_BC_RIGHT;
-    in.encoder_delta    = 40000u;
+    memset(&msg_in, 0, sizeof(msg_in));
+    msg_in.seq              = 42u;
+    msg_in.veh_state        = msg_encode_veh_state(2u, 3u);
+    msg_in.line_state       = (uint8_t)MSG_LINE_TRACK;
+    msg_in.line_error       = -45;
+    msg_in.b_line_valid     = true;
+    msg_in.speed_pct        = 55u;
+    msg_in.hump_mm          = 120u;
+    msg_in.b_hump_sat       = true;
+    msg_in.b_hump_invalid   = true;
+    msg_in.tilt_deg         = -12;
+    msg_in.obst_distance_cm = 200u;
+    msg_in.fault_mask       = 0x0285u;
+    msg_in.wifi_state       = 3u;
+    msg_in.last_barcode     = (uint8_t)MSG_BC_RIGHT;
+    msg_in.encoder_delta    = 40000u;
 
-    CHECK_EQ_INT(msg_pack_telemetry(&in, buf, sizeof(buf)),
+    CHECK_EQ_INT(msg_pack_telemetry(&msg_in, buf, sizeof(buf)),
                  MSG_LEN_TELEMETRY, "pack length");
     CHECK_TRUE(msg_unpack_telemetry(buf, sizeof(buf), &out), "unpack ok");
 
-    CHECK_EQ_INT(out.seq,              in.seq,              "seq");
-    CHECK_EQ_INT(out.veh_state,        in.veh_state,        "veh_state");
-    CHECK_EQ_INT(out.line_state,       in.line_state,       "line_state");
-    CHECK_EQ_INT(out.line_error,       in.line_error,       "line_error");
-    CHECK_TRUE(out.b_line_valid    ==  in.b_line_valid,     "line_valid");
-    CHECK_EQ_INT(out.speed_pct,        in.speed_pct,        "speed");
-    CHECK_EQ_INT(out.hump_mm,          in.hump_mm,          "hump_mm");
-    CHECK_TRUE(out.b_hump_sat      ==  in.b_hump_sat,       "hump_sat");
-    CHECK_TRUE(out.b_hump_invalid  ==  in.b_hump_invalid,   "hump_invalid");
-    CHECK_EQ_INT(out.tilt_deg,         in.tilt_deg,         "tilt");
-    CHECK_EQ_INT(out.obst_distance_cm, in.obst_distance_cm, "obst distance");
-    CHECK_EQ_INT(out.fault_mask,       in.fault_mask,       "fault mask");
-    CHECK_EQ_INT(out.wifi_state,       in.wifi_state,       "wifi state");
-    CHECK_EQ_INT(out.last_barcode,     in.last_barcode,     "last barcode");
-    CHECK_EQ_INT(out.encoder_delta,    in.encoder_delta,    "encoder delta");
+    CHECK_EQ_INT(out.seq,              msg_in.seq,              "seq");
+    CHECK_EQ_INT(out.veh_state,        msg_in.veh_state,        "veh_state");
+    CHECK_EQ_INT(out.line_state,       msg_in.line_state,       "line_state");
+    CHECK_EQ_INT(out.line_error,       msg_in.line_error,       "line_error");
+    CHECK_TRUE(out.b_line_valid    ==  msg_in.b_line_valid,     "line_valid");
+    CHECK_EQ_INT(out.speed_pct,        msg_in.speed_pct,        "speed");
+    CHECK_EQ_INT(out.hump_mm,          msg_in.hump_mm,          "hump_mm");
+    CHECK_TRUE(out.b_hump_sat      ==  msg_in.b_hump_sat,       "hump_sat");
+    CHECK_TRUE(out.b_hump_invalid  ==  msg_in.b_hump_invalid,   "hump_invalid");
+    CHECK_EQ_INT(out.tilt_deg,         msg_in.tilt_deg,         "tilt");
+    CHECK_EQ_INT(out.obst_distance_cm, msg_in.obst_distance_cm, "obst dist");
+    CHECK_EQ_INT(out.fault_mask,       msg_in.fault_mask,       "fault mask");
+    CHECK_EQ_INT(out.wifi_state,       msg_in.wifi_state,       "wifi state");
+    CHECK_EQ_INT(out.last_barcode,     msg_in.last_barcode,     "last barcode");
+    CHECK_EQ_INT(out.encoder_delta,    msg_in.encoder_delta,    "enc delta");
 
     buf[0] = (uint8_t)(MSG_SCHEMA_VERSION + 1u);
     CHECK_TRUE(!msg_unpack_telemetry(buf, sizeof(buf), &out),
                "wrong schema version rejected");
 
-    (void)msg_pack_telemetry(&in, buf, sizeof(buf));
+    (void)msg_pack_telemetry(&msg_in, buf, sizeof(buf));
     buf[2] = (uint8_t)(buf[2] | 0xE0u);         /* line_state = 7 */
     CHECK_TRUE(!msg_unpack_telemetry(buf, sizeof(buf), &out),
                "undefined line_state rejected");
@@ -243,42 +253,42 @@ static void test_telemetry(void)
  * --------------------------------------------------------------------- */
 static void test_obstacle(void)
 {
-    msg_obstacle_t in;
+    msg_obstacle_t msg_in;
     msg_obstacle_t out;
     uint8_t        buf[MSG_LEN_OBSTACLE];
-    int            bearing;
-    int            failures = 0;
+    int32_t        bearing;
+    int32_t        failures = 0;
 
     printf("obstacle profile: bearing range, boundaries, guards\n");
 
-    memset(&in, 0, sizeof(in));
-    in.distance_cm    = 100u;
-    in.width_cm       = 20u;
-    in.clear_left_cm  = 10u;
-    in.clear_right_cm = 25u;
-    in.side           = MSG_SIDE_LEFT;
+    memset(&msg_in, 0, sizeof(msg_in));
+    msg_in.distance_cm    = 100u;
+    msg_in.width_cm       = 20u;
+    msg_in.clear_left_cm  = 10u;
+    msg_in.clear_right_cm = 25u;
+    msg_in.side           = MSG_SIDE_LEFT;
 
     for (bearing = -63; bearing <= 63; bearing++)
     {
-        in.bearing_deg = (int8_t)bearing;
-        (void)msg_pack_obstacle(&in, buf, sizeof(buf));
+        msg_in.bearing_deg = (int8_t)bearing;
+        (void)msg_pack_obstacle(&msg_in, buf, sizeof(buf));
         if (!msg_unpack_obstacle(buf, sizeof(buf), &out)
-            || (out.bearing_deg != in.bearing_deg))
+            || (out.bearing_deg != msg_in.bearing_deg))
         {
             failures++;
         }
     }
     CHECK_EQ_INT(failures, 0, "bearing -63..+63 round trips with sign");
 
-    in.distance_cm    = (uint8_t)MSG_MAX_OBST_DIST;
-    in.width_cm       = 200u;       /* over the 6-bit field: clamps */
-    in.bearing_deg    = -63;
-    in.clear_left_cm  = 99u;        /* over the 5-bit field: clamps */
-    in.clear_right_cm = 0u;
-    in.side           = MSG_SIDE_RIGHT;
-    in.b_saturated    = true;
+    msg_in.distance_cm    = (uint8_t)MSG_MAX_OBST_DIST;
+    msg_in.width_cm       = 200u;       /* over the 6-bit field: clamps */
+    msg_in.bearing_deg    = -63;
+    msg_in.clear_left_cm  = 99u;        /* over the 5-bit field: clamps */
+    msg_in.clear_right_cm = 0u;
+    msg_in.side           = MSG_SIDE_RIGHT;
+    msg_in.b_saturated    = true;
 
-    (void)msg_pack_obstacle(&in, buf, sizeof(buf));
+    (void)msg_pack_obstacle(&msg_in, buf, sizeof(buf));
     CHECK_TRUE(msg_unpack_obstacle(buf, sizeof(buf), &out), "unpack ok");
     CHECK_EQ_INT(out.distance_cm,    255, "distance max");
     CHECK_EQ_INT(out.width_cm,       MSG_MAX_OBST_WIDTH, "width clamps");
@@ -299,16 +309,16 @@ static void test_obstacle(void)
  * --------------------------------------------------------------------- */
 static void test_barcode_msg(void)
 {
-    msg_barcode_t in;
+    msg_barcode_t msg_in;
     msg_barcode_t out;
     uint8_t       buf[MSG_LEN_BARCODE];
 
     printf("barcode message: saturation and guard\n");
 
-    in.cmd        = MSG_BC_LEFT;
-    in.confidence = 9u;
-    in.seq        = 2u;
-    (void)msg_pack_barcode(&in, buf, sizeof(buf));
+    msg_in.cmd        = MSG_BC_LEFT;
+    msg_in.confidence = 9u;
+    msg_in.seq        = 2u;
+    (void)msg_pack_barcode(&msg_in, buf, sizeof(buf));
     CHECK_TRUE(msg_unpack_barcode(buf, sizeof(buf), &out), "unpack ok");
     CHECK_EQ_INT(out.cmd, MSG_BC_LEFT, "command");
     CHECK_EQ_INT(out.confidence, 7, "confidence 9 clamps to 7 (was 1)");
@@ -326,18 +336,20 @@ static void test_shared_words(void)
 {
     msg_line_t line;
     uint32_t   word;
-    int        error;
-    int        failures = 0;
+    int32_t    error;
+    bool       b_even;
+    int32_t    failures = 0;
     uint8_t    hump;
 
     printf("single-word records: line reading, hump result\n");
 
     for (error = -63; error <= 63; error++)
     {
-        word = msg_pack_line(error, (0 == (error & 1)), 123456u);
+        b_even = (0 == (error % 2));
+        word   = msg_pack_line(error, b_even, 123456u);
         msg_unpack_line(word, &line);
-        if ((line.error != error) || (line.b_valid != (0 == (error & 1)))
-            || (line.time_ms != 123456u))
+        if ((error != line.error) || (b_even != line.b_valid)
+            || (123456u != line.time_ms))
         {
             failures++;
         }
@@ -367,12 +379,12 @@ static void test_shared_words(void)
  * --------------------------------------------------------------------- */
 static void test_veh_state(void)
 {
-    unsigned parent;
-    unsigned sub;
+    uint32_t parent;
+    uint32_t sub;
     uint8_t  encoded;
     uint8_t  got_parent;
     uint8_t  got_sub;
-    int      failures = 0;
+    int32_t  failures = 0;
 
     printf("vehicle state: parent + substate encoding\n");
 
@@ -417,32 +429,121 @@ static void test_buffer_guards(void)
 /* ---------------------------------------------------------------------
  * Subsystem 3: barcode width classification.
  * --------------------------------------------------------------------- */
+/* Declared in barcode_decoder.c (not yet in subsystem3.h). */
+bool s3_code39_decode(const uint16_t *p_widths, uint8_t count,
+                      char *p_letter, bool *pb_reversed,
+                      uint8_t *p_confidence);
+msg_barcode_cmd_t s3_letter_command(char letter);
+
+/* Command letters as set in barcode_decoder.c (S3_BC_LETTER_*). */
+#define TEST_LETTER_LEFT        ('M')
+#define TEST_LETTER_RIGHT       ('O')
+#define TEST_LETTER_STRAIGHT    ('N')
+#define TEST_LETTER_UTURN       ('P')
+
+/* Code 39 patterns, 9 elements bar/space alternating, MSB = first. */
+static uint16_t c39_pattern(char letter)
+{
+    static const struct { char letter; uint16_t pattern; } tab[] =
+    {
+        { '*', 0x094u }, { 'B', 0x049u }, { 'D', 0x019u }, { 'E', 0x118u },
+        { 'F', 0x058u }, { 'L', 0x043u }, { 'M', 0x142u }, { 'N', 0x013u },
+        { 'O', 0x112u }, { 'P', 0x052u }
+    };
+    size_t  idx;
+
+    for (idx = 0u; idx < (sizeof(tab) / sizeof(tab[0])); idx++)
+    {
+        if (tab[idx].letter == letter)
+        {
+            return (tab[idx].pattern);
+        }
+    }
+    return (0u);
+}
+
+/* Widths (0.1 mm) of "*X*": 29 elements, narrow / wide as given. */
+static uint8_t c39_symbol(char letter, uint16_t narrow, uint16_t wide,
+                          uint16_t *p_out)
+{
+    const char text[3] = { '*', letter, '*' };
+    uint8_t    count = 0u;
+    uint32_t   pos;
+    int32_t bit;
+
+    for (pos = 0u; pos < 3u; pos++)
+    {
+        uint16_t pattern = c39_pattern(text[pos]);
+
+        for (bit = 8; bit >= 0; bit--)
+        {
+            p_out[count] = (0u != (pattern & (1u << (uint32_t)bit)))
+                           ? wide : narrow;
+            count = (uint8_t)(count + 1u);
+        }
+        if (pos < 2u)
+        {
+            p_out[count] = narrow;              /* inter-character gap */
+            count = (uint8_t)(count + 1u);
+        }
+    }
+    return (count);
+}
+
 static void test_barcode_decode(void)
 {
-    uint16_t widths[4];
+    uint16_t widths[40];
+    uint16_t back[40];
     uint8_t  conf = 0u;
+    uint8_t  count;
+    uint8_t  idx;
+    char     letter = '\0';
+    bool     b_rev  = false;
 
-    printf("subsystem 3: barcode width classification\n");
+    printf("subsystem 3: Code 39 barcode decoding\n");
 
-    widths[0] = 1000u; widths[1] = 1000u; widths[2] = 1000u; widths[3] = 2500u;
-    CHECK_EQ_INT(s3_decode_widths(widths, 4u, &conf), MSG_BC_STRAIGHT,
-                 "N,N,N,W -> STRAIGHT");
-    CHECK_EQ_INT(conf, 7, "one wide element -> confidence 7");
+    count = c39_symbol(TEST_LETTER_STRAIGHT, 100u, 300u, widths);
+    CHECK_EQ_INT(count, 29, "*X* is 29 elements");
+    CHECK_TRUE(s3_code39_decode(widths, count, &letter, &b_rev, &conf),
+               "straight letter decodes");
+    CHECK_EQ_INT(letter, TEST_LETTER_STRAIGHT, "straight letter");
+    CHECK_TRUE(!b_rev, "read forwards");
+    CHECK_EQ_INT(s3_decode_widths(widths, count, &conf), MSG_BC_STRAIGHT,
+                 "straight letter -> STRAIGHT");
 
-    widths[0] = 2500u; widths[1] = 1000u; widths[2] = 1000u; widths[3] = 1000u;
-    CHECK_EQ_INT(s3_decode_widths(widths, 4u, &conf), MSG_BC_U_TURN,
-                 "W,N,N,N -> U_TURN");
+    /* Read backwards (car driving the other way). */
+    count = c39_symbol(TEST_LETTER_UTURN, 100u, 300u, widths);
+    for (idx = 0u; idx < count; idx++)
+    {
+        back[idx] = widths[count - 1u - idx];
+    }
+    CHECK_EQ_INT(s3_decode_widths(back, count, &conf), MSG_BC_U_TURN,
+                 "U-turn letter read backwards -> U_TURN");
 
-    /* Speed independence: the same symbol at half speed. */
-    widths[0] = 2000u; widths[1] = 2000u; widths[2] = 5000u; widths[3] = 2000u;
-    CHECK_EQ_INT(s3_decode_widths(widths, 4u, &conf), MSG_BC_LEFT,
-                 "N,N,W,N at half speed -> LEFT");
+    /* Speed independence: the long sheet is the same at half scale. */
+    count = c39_symbol(TEST_LETTER_LEFT, 50u, 150u, widths);
+    CHECK_EQ_INT(s3_decode_widths(widths, count, &conf), MSG_BC_LEFT,
+                 "left letter at half scale -> LEFT");
 
-    widths[0] = 10u; widths[1] = 10u; widths[2] = 10u; widths[3] = 10u;
-    CHECK_EQ_INT(s3_decode_widths(widths, 4u, &conf), MSG_BC_INVALID,
-                 "noise widths rejected");
+    /* A stray element (sheet edge) before the first bar. */
+    back[0] = 400u;
+    count = c39_symbol(TEST_LETTER_RIGHT, 100u, 250u, &back[1]);
+    CHECK_EQ_INT(s3_decode_widths(back, (uint8_t)(count + 1u), &conf),
+                 MSG_BC_RIGHT, "stray leading element skipped -> RIGHT");
 
-    CHECK_EQ_INT(s3_decode_widths(widths, 3u, &conf), MSG_BC_INVALID,
+    /* A valid letter that is not a command. */
+    count = c39_symbol('E', 100u, 300u, widths);
+    CHECK_EQ_INT(s3_decode_widths(widths, count, &conf), MSG_BC_NONE,
+                 "non-command letter -> NONE");
+
+    /* Noise: no wide elements at all. */
+    for (idx = 0u; idx < 29u; idx++)
+    {
+        widths[idx] = 100u;
+    }
+    CHECK_EQ_INT(s3_decode_widths(widths, 29u, &conf), MSG_BC_INVALID,
+                 "all-narrow noise rejected");
+    CHECK_EQ_INT(s3_decode_widths(widths, 28u, &conf), MSG_BC_INVALID,
                  "too few elements rejected");
 }
 
@@ -483,16 +584,19 @@ static void test_obstacle_profile(void)
                  "neither side fits -> NONE");
     CHECK_EQ_INT(s5_lateral_cm(50u, -30), -25, "50 cm at -30 deg = -25 cm");
 
-    /* A 25 cm-distant box from -10 to +10 degrees, a wall at 40 cm on the
-       far right (the last three steps), nothing else in range. */
+    /* A 25 cm-distant box echoing from -20 to +20 degrees (really -10 to
+       +10: the beam adds S5_BEAM_HALF_DEG each side), a wall at 40 cm on
+       the far right (the last two steps), nothing else in range. */
     /* Indices follow the configured scan arc (S5_SCAN_ARC_DEG). */
     memset(scan, 0, sizeof(scan));
-    for (idx = (uint32_t)((S5_FINE_ARC_DEG - 10) / S5_STEP_DEG);
-         idx <= (uint32_t)((S5_FINE_ARC_DEG + 10) / S5_STEP_DEG); idx++)
+    for (idx = (uint32_t)((S5_FINE_ARC_DEG - 10 - S5_BEAM_HALF_DEG)
+                          / S5_STEP_DEG);
+         idx <= (uint32_t)((S5_FINE_ARC_DEG + 10 + S5_BEAM_HALF_DEG)
+                           / S5_STEP_DEG); idx++)
     {
         scan[idx] = 25u;
     }
-    for (idx = S5_FINE_STEPS - 3u; idx < S5_FINE_STEPS; idx++)
+    for (idx = S5_FINE_STEPS - 2u; idx < S5_FINE_STEPS; idx++)
     {
         scan[idx] = 40u;
     }
@@ -500,8 +604,10 @@ static void test_obstacle_profile(void)
     CHECK_TRUE(s5_build_profile(scan, S5_FINE_STEPS, 30u, &profile),
                "profile built");
     CHECK_EQ_INT(profile.distance_cm, 25, "closest point 25 cm");
-    CHECK_EQ_INT(profile.bearing_deg, -10, "bearing of closest point");
-    CHECK_EQ_INT(profile.width_cm, 8, "width from the angular span");
+    CHECK_EQ_INT(profile.bearing_deg, -10 - S5_BEAM_HALF_DEG,
+                 "bearing of closest point");
+    CHECK_EQ_INT(profile.width_cm, 8 - (2 * S5_BEAM_SPREAD_CM),
+                 "width from the angular span, minus the beam spread");
     CHECK_TRUE(profile.clear_left_cm > profile.clear_right_cm,
                "open left side has more room than the walled right");
     CHECK_EQ_INT(profile.clear_left_cm, MSG_MAX_OBST_CLEAR,
@@ -518,21 +624,48 @@ static void test_obstacle_profile(void)
     memset(scan, 0, sizeof(scan));
     CHECK_TRUE(!s5_build_profile(scan, S5_FINE_STEPS, 30u, &profile),
                "nothing in range -> no profile (false alarm)");
+
+    if (13u == S5_FINE_STEPS)
+    {
+        /* Bench 17 Nov: echoes -20..+15 deg at ~29 cm.  Beam-corrected
+           (10 deg) the edges are -10 / +5 deg, plus one step out: left
+           ~-7 cm, right ~+5 cm, both packed in one 16-bit word (CR1). */
+        static const uint8_t bench[13] = { 0u, 0u, 29u, 31u, 29u, 29u,
+                                           29u, 29u, 30u, 30u, 0u, 0u, 0u };
+        /* Test 10: block running off the LEFT end, right edge seen. */
+        static const uint8_t t10[13] = { 30u, 29u, 29u, 30u, 30u, 30u,
+                                         29u, 30u, 30u, 30u, 32u, 0u, 0u };
+        int32_t edge_left;
+        int32_t edge_right;
+
+        CHECK_TRUE(s5_build_profile(bench, 13u, 30u, &profile),
+                   "bench scan -> profile");
+        s5_get_edges_cm(&edge_left, &edge_right);
+        CHECK_TRUE((edge_right >= 4) && (edge_right <= 6),
+                   "bench scan: right edge ~+5 cm (beam-corrected + step)");
+        CHECK_TRUE((edge_left <= -6) && (edge_left >= -9),
+                   "bench scan: left edge ~-7 cm (beam-corrected + step)");
+
+        CHECK_TRUE(s5_build_profile(t10, 13u, 30u, &profile),
+                   "test 10 scan -> profile");
+        CHECK_EQ_INT(profile.side, MSG_SIDE_RIGHT,
+                     "test 10: goes round the open right");
+    }
 }
 
 /* ---------------------------------------------------------------------
  * CR1 deliverable 3: message sizes.  "Before" is sizeof() of each
- * unpacked struct on THIS compiler -- measured, not typed in.  The kernel
+ * unpacked struct on THIS compiler -- measured, not typed msg_in.  The kernel
  * column is what one message costs inside a micro T-Kernel message buffer
  * (4-byte header + body rounded up to 4).  Run `make target-sizes` for
  * the same table on arm-none-eabi-gcc, which uses 1-byte enums.
  * --------------------------------------------------------------------- */
-static void report_row(const char *p_name, unsigned before, unsigned after)
+static void report_row(const char *p_name, uint32_t before, uint32_t after)
 {
     printf("  %-18s %7u %7u %6u%%   %7u %7u\n", p_name, before, after,
            (100u * (before - after)) / before,
-           (unsigned)APP_MBF_SLOT_BYTES(before),
-           (unsigned)APP_MBF_SLOT_BYTES(after));
+           (uint32_t)APP_MBF_SLOT_BYTES(before),
+           (uint32_t)APP_MBF_SLOT_BYTES(after));
 }
 
 static void report_sizes(void)
@@ -540,13 +673,13 @@ static void report_sizes(void)
     printf("\n--- CR1: message size, this compiler (sizeof) ---\n");
     printf("  %-18s %7s %7s %7s   %15s\n", "message", "before", "after",
            "saving", "kernel slot b/a");
-    report_row("motion command", (unsigned)sizeof(msg_motion_cmd_t),
+    report_row("motion command", (uint32_t)sizeof(msg_motion_cmd_t),
                MSG_LEN_MOTION_CMD);
-    report_row("barcode command", (unsigned)sizeof(msg_barcode_t),
+    report_row("barcode command", (uint32_t)sizeof(msg_barcode_t),
                MSG_LEN_BARCODE);
-    report_row("obstacle profile", (unsigned)sizeof(msg_obstacle_t),
+    report_row("obstacle profile", (uint32_t)sizeof(msg_obstacle_t),
                MSG_LEN_OBSTACLE);
-    report_row("telemetry frame", (unsigned)sizeof(msg_telemetry_t),
+    report_row("telemetry frame", (uint32_t)sizeof(msg_telemetry_t),
                MSG_LEN_TELEMETRY);
     printf("  line reading       12 -> 4 B (one word), hump result 3 -> 1 B\n");
 }
@@ -561,7 +694,7 @@ static void test_motor_maths(void)
     int32_t output    = 0;
     int32_t bound;
     int32_t back_mm;
-    int     idx;
+    int32_t idx;
 
     printf("subsystem 2: clamp, geometry, PID, slew limiter\n");
 
@@ -627,7 +760,7 @@ static void test_motor_maths(void)
 typedef struct
 {
     void       (*p_run)(void);
-    int          owner;          /* 1..5, 0 = shared (run for everyone) */
+    int32_t      owner;          /* 1..5, 0 = shared (run for everyone) */
 } suite_t;
 
 static const suite_t suites[] =
@@ -653,12 +786,12 @@ static const suite_t suites[] =
  */
 int main(int argc, char **argv)
 {
-    int    buddy = 0;
-    size_t idx;
+    int32_t buddy = 0;
+    size_t  idx;
 
     if (argc > 1)
     {
-        buddy = (int)(argv[1][0] - '0');
+        buddy = (int32_t)(argv[1][0] - '0');
         if ((buddy < 1) || (buddy > 5) || ('\0' != argv[1][1]))
         {
             printf("usage: %s [1-5]   (no argument = every buddy)\n",
