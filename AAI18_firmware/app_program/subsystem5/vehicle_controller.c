@@ -433,6 +433,7 @@ static void run_leg(uint8_t leg)
             {
                 report_size();
                 s5_obstacle_request(S5_REQ_AHEAD);
+                turn_deg = 90u; 
             }
             send_turn(false);
         break;

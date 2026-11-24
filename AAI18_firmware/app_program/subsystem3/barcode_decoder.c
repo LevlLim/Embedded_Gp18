@@ -63,16 +63,16 @@
 /* Which letter means which command at the next junction.  Others are
    decoded and reported but give no command. */
 #ifndef S3_BC_LETTER_LEFT
-#define S3_BC_LETTER_LEFT       ('L')
+#define S3_BC_LETTER_LEFT       ('M')
 #endif
 #ifndef S3_BC_LETTER_RIGHT
-#define S3_BC_LETTER_RIGHT      ('B')
+#define S3_BC_LETTER_RIGHT      ('O')
 #endif
 #ifndef S3_BC_LETTER_STRAIGHT
-#define S3_BC_LETTER_STRAIGHT   ('F')
+#define S3_BC_LETTER_STRAIGHT   ('N')
 #endif
 #ifndef S3_BC_LETTER_UTURN
-#define S3_BC_LETTER_UTURN      ('D')
+#define S3_BC_LETTER_UTURN      ('P')
 #endif
 
 /* EDGES BY CHANGE (SHORT sheets).  The sensor's spot is a few mm wide, so

@@ -47,8 +47,12 @@ static volatile uint16_t side_word      = 0u;
 static bool     b_side_active  = false;
 static bool     b_side_reported = false;
 static uint8_t  side_debounce  = 0u;
-static int32_t  side_peak_deg  = 0;
+static int32_t  side_peak_x10  = 0;   /* peak steady height, 0.1 mm   */
 static int32_t  side_dir       = 0;
+static int32_t  side_x16       = 0;   /* side accel, mg x 16 (filter) */
+static int32_t  side_base_x16  = 0;   /* its level value              */
+static volatile int32_t side_steady_x10 = 0;  /* steady height, 0.1 mm */
+static bool     b_side_base_ok = false;
 static uint32_t side_start_ms  = 0u;
 static int32_t  roll_x8  = 0;
 static volatile uint8_t    hump_packed   = 0u;   /* msg_pack_hump()  */
@@ -469,30 +473,56 @@ static void update_tilt(const uint8_t *p_buf, uint8_t count)
               / S4_TILT_FILTER_DIV;
     tilt_deg  = (int8_t)(pitch_x8 / 8);
     roll_deg  = (int8_t)(roll_x8 / 8);
+
+    /* Side ramp: the side acceleration itself, kept in 1/16 mg. */
+    side_x16 += ((side_mg * 16) - side_x16) / S4_TILT_FILTER_DIV;
 }
 
-/* Height of the raised side for a roll angle, mm (one side on the floor). */
-static uint16_t side_height_for(int32_t roll_abs_deg)
+/*
+ * Height of the raised side in 0.1 mm for a change of side acceleration
+ * (mg x 16) with one side on the floor: spacing x sin(roll), and
+ * sin(roll) = change / 1000 mg.  Then the measured gain.
+ */
+static int32_t side_height_x10(int32_t change_x16)
 {
-    int32_t deg = (roll_abs_deg > 45) ? 45 : roll_abs_deg;
+    int32_t mag = (change_x16 < 0) ? -change_x16 : change_x16;
 
-    return ((uint16_t)((S4_WHEEL_SPACING_MM * (int32_t)sin_q8[deg]) / 256));
+    mag = (mag > (1000 * 16)) ? (1000 * 16) : mag;       /* <= 1 g    */
+
+    return ((S4_WHEEL_SPACING_MM * mag * S4_SIDE_GAIN_PCT)
+            / (1600 * 100));
+}
+
+/* 0.1 mm to whole mm, rounded. */
+static uint16_t side_mm(int32_t height_x10)
+{
+    return ((uint16_t)((height_x10 + 5) / 10));
 }
 
 /* Report the current side ramp on the console (and car18/log). */
 static void report_side(const char *p_when)
 {
-    uint16_t height_mm = side_height_for(side_peak_deg);
+    uint16_t height_mm = side_mm(side_peak_x10);
 
-    side_word = (uint16_t)(((height_mm > S4_SIDE_MM_MAX)
-                            ? S4_SIDE_MM_MAX : height_mm)
-                           | ((side_dir > 0) ? S4_SIDE_UP_POS
-                              : ((side_dir < 0) ? S4_SIDE_UP_NEG : 0u)));
+    if (height_mm < S4_SIDE_MIN_MM)
+    {
+        APP_LOG((UB*)"[S4] side ramp %s: %d.%d mm, under %d mm: ignored\n",
+                p_when, (INT)(side_peak_x10 / 10),
+                (INT)(side_peak_x10 % 10), (INT)S4_SIDE_MIN_MM);
+    }
+    else
+    {
+        side_word = (uint16_t)(((height_mm > S4_SIDE_MM_MAX)
+                                ? S4_SIDE_MM_MAX : height_mm)
+                               | ((side_dir > 0) ? S4_SIDE_UP_POS
+                                  : ((side_dir < 0) ? S4_SIDE_UP_NEG
+                                     : 0u)));
 
-    APP_LOG((UB*)"[S4] side ramp %s: %s side up, peak roll %d deg -> "
-                 "%d mm\n", p_when,
-            (side_dir > 0) ? "roll+" : "roll-", (INT)side_peak_deg,
-            (INT)height_mm);
+        APP_LOG((UB*)"[S4] side ramp %s: %s side up, %d.%d mm -> %d mm\n",
+                p_when, (side_dir > 0) ? "roll+" : "roll-",
+                (INT)(side_peak_x10 / 10), (INT)(side_peak_x10 % 10),
+                (INT)height_mm);
+    }
 }
 
 /*
@@ -533,57 +563,91 @@ static bool is_turning(void)
 
 static void step_side_ramp(void)
 {
-    int32_t roll    = (int32_t)roll_deg;
-    int32_t mag     = (roll < 0) ? -roll : roll;
-    int32_t dir     = (roll < 0) ? -1 : 1;
-    bool    b_turn  = is_turning();
+    static int32_t avg_x16 = 0;       /* steady change, mg x 16        */
+    int32_t        steady_x10;
+    int32_t        dir;
+    bool           b_turn = is_turning();
 
     if (!b_calibrated)
     {
-        b_side_active = false;
-        side_debounce = 0u;
-    }
-    else if (!b_side_active)
-    {
-        side_debounce = ((mag >= S4_SIDE_START_DEG) && !b_turn)
-                      ? (uint8_t)(side_debounce + 1u) : 0u;
-        if (side_debounce >= (uint8_t)S4_SIDE_DEBOUNCE)
-        {
-            b_side_active   = true;
-            b_side_reported = false;
-            side_debounce   = 0u;
-            side_peak_deg   = mag;
-            side_dir        = dir;
-            side_start_ms   = app_now_ms();
-            APP_LOG((UB*)"[S4] side ramp start (%s)\n",
-                    (dir > 0) ? "roll+" : "roll-");
-        }
+        b_side_active   = false;
+        b_side_base_ok  = false;
+        side_debounce   = 0u;
+        side_steady_x10 = 0;
     }
     else
     {
-        if ((dir == side_dir) && (mag > side_peak_deg) && !b_turn)
+        if (!b_side_base_ok)
         {
-            side_peak_deg = mag;
+            side_base_x16  = side_x16;      /* start from where it is */
+            avg_x16        = 0;
+            b_side_base_ok = true;
         }
 
-        side_debounce = (mag < S4_SIDE_LEVEL_DEG)
-                      ? (uint8_t)(side_debounce + 1u) : 0u;
+        avg_x16 += ((side_x16 - side_base_x16) - avg_x16) / S4_SIDE_HOLD_DIV;
+        steady_x10      = side_height_x10(avg_x16);
+        side_steady_x10 = steady_x10;
+        dir             = (avg_x16 < 0) ? -1 : 1;
 
-        if (side_debounce >= (uint8_t)S4_SIDE_DEBOUNCE)
+        if (!b_side_active)
         {
-            report_side("done");
-            b_side_active = false;
-            side_debounce = 0u;
-        }
-        else if (!b_side_reported
-                 && ((app_now_ms() - side_start_ms) > S4_SIDE_REPORT_MS))
-        {
-            report_side("still raised");
-            b_side_reported = true;
+            side_debounce = ((steady_x10 >= S4_SIDE_START_MM_X10) && !b_turn)
+                          ? (uint8_t)(side_debounce + 1u) : 0u;
+
+            if (side_debounce >= (uint8_t)S4_SIDE_DEBOUNCE)
+            {
+                b_side_active   = true;
+                b_side_reported = false;
+                side_debounce   = 0u;
+                side_peak_x10   = 0;
+                side_dir        = dir;
+                side_start_ms   = app_now_ms();
+                APP_LOG((UB*)"[S4] side ramp start (%s)\n",
+                        (dir > 0) ? "roll+" : "roll-");
+            }
+            else if (steady_x10 < S4_SIDE_LEVEL_MM_X10)
+            {
+                /* Level: follow the car's own level value slowly, so
+                   only a CHANGE counts as height.  Not while it rises
+                   towards the start level: that would eat the height. */
+                side_base_x16 += (side_x16 - side_base_x16)
+                               / S4_SIDE_BASE_DIV;
+            }
+            else
+            {
+                /* Maybe starting: hold the level value. */
+            }
         }
         else
         {
-            /* On the ramp. */
+            /* Peak only once the car has settled on the ramp: a knock
+               on the way up (wheel hitting the edge, a hand placing
+               the car) is still in the average for ~100 ms. */
+            if ((dir == side_dir) && (steady_x10 > side_peak_x10) && !b_turn
+                && ((app_now_ms() - side_start_ms) >= S4_SIDE_SETTLE_MS))
+            {
+                side_peak_x10 = steady_x10;
+            }
+
+            side_debounce = (steady_x10 < S4_SIDE_LEVEL_MM_X10)
+                          ? (uint8_t)(side_debounce + 1u) : 0u;
+
+            if (side_debounce >= (uint8_t)S4_SIDE_DEBOUNCE)
+            {
+                report_side("done");
+                b_side_active = false;
+                side_debounce = 0u;
+            }
+            else if (!b_side_reported
+                     && ((app_now_ms() - side_start_ms) > S4_SIDE_REPORT_MS))
+            {
+                report_side("still raised");
+                b_side_reported = true;
+            }
+            else
+            {
+                /* On the ramp. */
+            }
         }
     }
 }
@@ -838,11 +902,9 @@ EXPORT uint16_t s4_get_side_height_mm(void)
 
 EXPORT uint16_t s4_get_side_live_mm(void)
 {
-    int32_t roll = (int32_t)roll_deg;
+    int32_t steady_x10 = side_steady_x10;       /* one load */
 
-    roll = (roll < 0) ? -roll : roll;
-
-    return (b_side_active ? side_height_for(roll) : 0u);
+    return (b_side_active ? side_mm(steady_x10) : 0u);
 }
 
 EXPORT int8_t s4_get_side_sign(void)
